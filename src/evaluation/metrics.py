@@ -1,0 +1,146 @@
+"""
+Retrieval evaluation metrics: Recall@k, MRR@k, nDCG@k.
+Also provides evaluate_rank_data() used during training for early stopping.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import numpy as np
+from typing import Dict, List, Optional
+import torch
+from loguru import logger
+
+from src.common.question_types import normalize_question_type
+
+
+def recall_at_k(ranked_ids: List[str], relevant_ids: set, k: int) -> float:
+    return 1.0 if any(r in relevant_ids for r in ranked_ids[:k]) else 0.0
+
+
+def mrr_at_k(ranked_ids: List[str], relevant_ids: set, k: int) -> float:
+    for i, rid in enumerate(ranked_ids[:k]):
+        if rid in relevant_ids:
+            return 1.0 / (i + 1)
+    return 0.0
+
+
+def ndcg_at_k(ranked_ids: List[str], relevant_ids: set, k: int) -> float:
+    dcg = sum(
+        1.0 / math.log2(i + 2)
+        for i, r in enumerate(ranked_ids[:k])
+        if r in relevant_ids
+    )
+    idcg = sum(
+        1.0 / math.log2(i + 2)
+        for i in range(min(len(relevant_ids), k))
+    )
+    return dcg / idcg if idcg > 0 else 0.0
+
+
+def evaluate_retrieval(
+    results: List[Dict],
+    cutoffs=(5, 10, 20),
+    by_qtype: bool = True
+) -> Dict:
+
+    metrics = {k: {"recall": [], "mrr": [], "ndcg": []} for k in cutoffs}
+    qtype_metrics = {}
+
+    for item in results:
+        ranked = item["ranked_ids"]
+        relevant = set(item["relevant_ids"])
+        qtype = normalize_question_type(item.get("question_type", "other"))
+
+        if qtype not in qtype_metrics:
+            qtype_metrics[qtype] = {k: {"ndcg": []} for k in cutoffs}
+
+        for k in cutoffs:
+            r = recall_at_k(ranked, relevant, k)
+            m = mrr_at_k(ranked, relevant, k)
+            n = ndcg_at_k(ranked, relevant, k)
+
+            metrics[k]["recall"].append(r)
+            metrics[k]["mrr"].append(m)
+            metrics[k]["ndcg"].append(n)
+            qtype_metrics[qtype][k]["ndcg"].append(n)
+
+    summary = {}
+
+    for k in cutoffs:
+        summary[f"recall@{k}"] = float(np.mean(metrics[k]["recall"]))
+        summary[f"mrr@{k}"] = float(np.mean(metrics[k]["mrr"]))
+        summary[f"ndcg@{k}"] = float(np.mean(metrics[k]["ndcg"]))
+
+    if by_qtype:
+        for qtype, data in qtype_metrics.items():
+            for k in cutoffs:
+                vals = data[k]["ndcg"]
+                summary[f"ndcg@{k}_{qtype}"] = float(np.mean(vals)) if vals else 0.0
+
+    return summary
+
+
+def evaluate_rank_data(
+    model,
+    dev_path: str,
+    device: str,
+    k: int = 10,
+    ablation: Optional[str] = None,
+) -> float:
+    """Compute mean nDCG@k over queries from rank JSONL (early stopping)."""
+
+    from collections import defaultdict
+
+    model.eval()
+    query_scores: Dict[str, List] = defaultdict(list)
+
+    with torch.no_grad(), open(dev_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if not line.strip():
+                continue
+
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            t = lambda x: torch.tensor([x], dtype=torch.float32, device=device)
+
+            s, _ = model(
+                sparse_feats=t(rec["sparse_feats"]),
+                dense_feats=t(rec["dense_feats"]),
+                kg_feats=t(rec["kg_feats"]),
+                query_emb=t(rec["query_emb"]),
+                qtype_onehot=t(rec["qtype_onehot"]),
+                kg_coverage=torch.tensor(
+                    [rec["kg_coverage"]],
+                    dtype=torch.float32,
+                    device=device
+                ),
+                ablation=ablation,
+            )
+
+            query_scores[rec["qid"]].append(
+                (float(s[0]), rec["pid"], rec["label"])
+            )
+
+    ndcgs = []
+
+    for qid, scored in query_scores.items():
+        if not scored:
+            continue
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        ranked = [pid for _, pid, _ in scored]
+        relevant = {pid for _, pid, lbl in scored if lbl == 1}
+
+        ndcgs.append(ndcg_at_k(ranked, relevant, k))
+
+    result = float(np.mean(ndcgs)) if ndcgs else 0.0
+
+    logger.info(f"Evaluation nDCG@{k}: {result:.4f}")
+
+    return result

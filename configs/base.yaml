@@ -1,0 +1,80 @@
+seed: 42
+
+paths:
+  corpus_jsonl: "data/corpus.jsonl"
+  bm25_index: "data/bm25_index"
+  faiss_index: "data/faiss.index"
+  faiss_meta: "data/faiss_meta.jsonl"
+  kg_graph: "data/kg/default/umls_kg.pkl"
+  kg_lexical_idx: "data/kg/default/umls_kg_lex.pkl"
+  rank_data_train: "data/rank_data_train.jsonl"
+  rank_data_dev: "data/rank_data_dev.jsonl"
+  results_dir: "results/"
+
+# Corpus scale (mirrors scripts/00_download_data.py — regenerate data after changes).
+corpus:
+  total_passages: 3000000
+  train_fraction: 0.8
+  val_fraction: 0.1
+  test_fraction: 0.1
+  pubmedqa_artificial_target_passages: 1500000
+  medmcqa_target_passages: 450000
+
+retrieval:
+  top_k_bm25: 25
+  top_k_faiss: 25
+  top_k_dense: 25
+  top_k_biobert: 25
+  top_k_doc2query: 25
+  candidate_pool_size: 50
+  biobert_checkpoint: "dmis-lab/biobert-v1.1"
+  biobert_batch_size: 128
+  biobert_max_length: 512
+  doc2query_model: "doc2query/msmarco-t5-base-v1"
+  doc2query_num_expansions: 4
+  doc2query_max_new_tokens: 24
+
+encoder:
+  model_name: "NeuML/pubmedbert-base-embeddings"
+  batch_size: 512
+  max_length: 128
+
+kg:
+  max_path_length: 4
+  max_entities_per_text: 6
+
+model:
+  sparse_feat_dim: 3
+  dense_feat_dim: 4
+  kg_feat_dim: 6
+  branch_hidden: 256
+  controller_hidden: 256
+  query_feat_dim: 768
+  # Must match src/common/question_types.ORDERED_QUESTION_TYPES (rank JSONL one-hot axes).
+  question_types: ["diagnosis", "treatment", "mechanism", "contraindication", "factoid", "yesno", "other"]
+  dropout: 0.2
+
+training:
+  epochs: 10
+  batch_size: 64
+  lr: 2.0e-5
+  weight_decay: 1.0e-4
+  margin: 1.0
+  loss: "softmax"
+  early_stopping_patience: 3
+  eval_metric: "ndcg@10"
+  num_negatives: 16
+  cudnn_deterministic: false
+
+evaluation:
+  cutoffs: [5, 10, 20]
+  question_type_breakdown: true
+
+qa:
+  reader_model: google/flan-t5-large
+  top_k_passages: 10
+  max_new_tokens: 256
+  # Agentic ReAct reader: Thought / Action / Observation with READ_PASSAGE, LIST_SIGNALS, FINAL
+  reader_react: false
+  reader_react_max_steps: 6
+  reader_react_tokens_per_step: null  # null = heuristic from max_new_tokens / steps

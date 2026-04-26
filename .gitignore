@@ -1,0 +1,49 @@
+# ----------------------
+# Python
+# ----------------------
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+
+# ----------------------
+# Build / packaging
+# ----------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ----------------------
+# Caches
+# ----------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ----------------------
+# Project outputs
+# ----------------------
+results/
+
+# ----------------------
+# DATA (CRITICAL)
+# ----------------------
+data/
+hf_cache/
+
+# Large data files
+*.jsonl
+*.pt
+*.bin
+*.index
+*.faiss
+
+# ----------------------
+# OS / misc
+# ----------------------
+.DS_Store
