@@ -32,6 +32,7 @@ from src.common.question_types import (
     assert_cfg_question_types,
     normalize_question_type,
 )
+from src.common.rank_data_paths import resolve_rank_data_file
 from src.evaluation.rank_jsonl_eval import load_rank_jsonl
 from src.evaluation.schemas import validate_controller_weights
 from src.model.gardian import GARDIAN
@@ -71,7 +72,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--retriever",
         type=str,
-        choices=["hybrid", "hybrid_neural", "doc2query"],
+        choices=[
+            "hybrid",
+            "hybrid_neural",
+            "hybrid_bm25_biobert",
+            "hybrid_doc2query_faiss",
+            "doc2query",
+        ],
         default="hybrid",
         help="Retriever family checkpoint and default rank-data naming.",
     )
@@ -86,7 +93,7 @@ def main() -> None:
     assert_cfg_question_types(cfg.model.question_types)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    rank_data_path = args.rank_data or f"data/rank_data_{args.retriever}_medmcqa_test.jsonl"
+    rank_data_path = args.rank_data or resolve_rank_data_file(args.retriever, "medmcqa", "test")
     records = load_rank_jsonl(rank_data_path)
     if not records:
         raise SystemExit(f"No records: {rank_data_path}")

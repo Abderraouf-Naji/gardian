@@ -46,6 +46,8 @@ def build_query_kg_cache(
     q_entities: List[str],
     G: nx.DiGraph,
     node_set: Optional[frozenset] = None,
+    compute_distances: bool = False,
+    max_path: int = MAX_PATH,
 ) -> Dict:
     """
     Pre-compute everything that depends only on the query entities.
@@ -61,9 +63,23 @@ def build_query_kg_cache(
     q_set = set(q_entities)
     g_nodes = node_set if node_set is not None else frozenset(G.nodes)
     q_nodes_in_G = q_set & g_nodes
+    # Optional: precompute shortest-path distances from query entities once per query.
+    # NOTE: expensive on large KG; keep disabled in full-scale generation unless needed.
+    dist_map: Dict[str, int] = {}
+    if compute_distances and q_nodes_in_G:
+        for qn in q_nodes_in_G:
+            try:
+                dists = nx.single_source_shortest_path_length(G, qn, cutoff=max_path)
+            except Exception:
+                dists = {}
+            for n, d in dists.items():
+                prev = dist_map.get(n)
+                if prev is None or d < prev:
+                    dist_map[n] = int(d)
     return {
         "q_set": q_set,
         "q_nodes_in_G": q_nodes_in_G,
+        "dist_map": dist_map,
     }
 
 
@@ -125,18 +141,25 @@ def compute_kg_features(
     norm_shared = len(shared) / (len(q_set) + len(p_set) + 1e-8)
 
     # [2] Avg distance  [3] Min distance
-    # Distance approximation: shared entities → 0, otherwise max_path.
-    # (Full BFS would add substantial cost; this approximation matches your current design.)
-    if shared:
-        avg_dist = 0.0
-        min_dist = 0.0
+    # Use cached query->node shortest-path lengths when available.
+    g_nodes = node_set if node_set is not None else frozenset(G.nodes)
+    p_nodes_in_G = list(p_set & g_nodes)
+    dist_map = query_cache.get("dist_map") if query_cache is not None else None
+    if dist_map is not None and p_nodes_in_G:
+        p_dists = [float(dist_map.get(n, max_path)) for n in p_nodes_in_G]
+        avg_dist = float(np.mean(p_dists)) if p_dists else float(max_path)
+        min_dist = float(np.min(p_dists)) if p_dists else float(max_path)
     else:
-        avg_dist = float(max_path)
-        min_dist = float(max_path)
+        # Fallback behavior (kept for backward compatibility / tests):
+        if shared:
+            avg_dist = 0.0
+            min_dist = 0.0
+        else:
+            avg_dist = float(max_path)
+            min_dist = float(max_path)
 
     # [4] Avg node degree in induced subgraph
     # Use pre-computed node_set to avoid copying 300K nodes into a new set.
-    g_nodes = node_set if node_set is not None else frozenset(G.nodes)
     induced_nodes = list((q_set | p_set) & g_nodes)
 
     if induced_nodes:
@@ -150,10 +173,18 @@ def compute_kg_features(
     else:
         avg_deg = 0.0
 
-    # [5] KG coverage indicator
-    kg_coverage = 1.0 if (q_entities or p_entities) else 0.0
+    # [5] KG coverage indicator (pair-level):
+    # whether query and passage share at least one linked KG entity.
+    kg_coverage = 1.0 if len(shared) > 0 else 0.0
+
+    # Keep scales closer to sparse/dense branch inputs:
+    # - distances in [0, max_path] -> [0, 1]
+    # - degree can be heavy-tailed -> log compression and light normalization.
+    avg_dist_n = float(avg_dist / max(1.0, float(max_path)))
+    min_dist_n = float(min_dist / max(1.0, float(max_path)))
+    avg_deg_n = float(np.log1p(max(avg_deg, 0.0)) / np.log1p(100.0))
 
     return np.array(
-        [coverage, norm_shared, avg_dist, min_dist, avg_deg, kg_coverage],
+        [coverage, norm_shared, avg_dist_n, min_dist_n, avg_deg_n, kg_coverage],
         dtype=np.float32,
     )

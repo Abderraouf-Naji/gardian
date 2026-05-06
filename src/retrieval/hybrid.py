@@ -3,8 +3,6 @@
 from typing import Dict, List, Optional
 from .bm25 import BM25Retriever
 from .dense import DenseRetriever
-from .biobert import BioBERTRetriever
-from .doc2query import Doc2QueryRetriever
 
 
 class HybridRetriever:
@@ -16,7 +14,7 @@ class HybridRetriever:
     """
 
     def __init__(self, bm25: BM25Retriever, dense: DenseRetriever,
-                 top_k_bm25: int = 200, top_k_dense: int = 200):
+                 top_k_bm25: int = 50, top_k_dense: int = 50):
         self.bm25 = bm25
         self.dense = dense
         self.top_k_bm25 = top_k_bm25
@@ -32,20 +30,37 @@ class HybridRetriever:
         top_k_dense are used).
         """
         _ = top_k, kwargs
-        bm25_hits = {h["id"]: h for h in self.bm25.retrieve(query, self.top_k_bm25)}
-        dense_hits = {h["id"]: h for h in self.dense.retrieve(query, self.top_k_dense)}
+        bm25_list = self.bm25.retrieve(query, self.top_k_bm25)
+        dense_list = self.dense.retrieve(query, self.top_k_dense)
+        bm25_hits = {h["id"]: h for h in bm25_list}
+        dense_hits = {h["id"]: h for h in dense_list}
+        bm25_rank = {h["id"]: i + 1 for i, h in enumerate(bm25_list)}
+        dense_rank = {h["id"]: i + 1 for i, h in enumerate(dense_list)}
         all_ids = set(bm25_hits) | set(dense_hits)
 
         results = []
+        k = 60.0  # standard RRF constant
         for pid in all_ids:
             bh = bm25_hits.get(pid, {})
             dh = dense_hits.get(pid, {})
+            r1 = bm25_rank.get(pid, 10**9)
+            r2 = dense_rank.get(pid, 10**9)
+            rrf = (1.0 / (k + r1)) + (1.0 / (k + r2))
             results.append({
                 "id": pid,
                 "text": bh.get("text") or dh.get("text", ""),
                 "bm25_score": bh.get("score", 0.0),
                 "dense_score": dh.get("score", 0.0),
+                "hybrid_rrf_score": float(rrf),
             })
+        results.sort(
+            key=lambda x: (
+                float(x.get("hybrid_rrf_score", 0.0)),
+                float(x.get("bm25_score", 0.0)),
+                float(x.get("dense_score", 0.0)),
+            ),
+            reverse=True,
+        )
         return results
 
     def batch_retrieve(self, queries: List[str]) -> List[List[Dict]]:
@@ -68,8 +83,8 @@ class DualHybridRetriever:
         second,
         first_score_key: str,
         second_score_key: str,
-        top_k_first: int = 200,
-        top_k_second: int = 200,
+        top_k_first: int = 50,
+        top_k_second: int = 50,
     ):
         self.first = first
         self.second = second
@@ -86,22 +101,39 @@ class DualHybridRetriever:
 
     def retrieve(self, query: str, top_k: Optional[int] = None, **kwargs) -> List[Dict]:
         _ = top_k, kwargs
-        first_hits = {h["id"]: h for h in self.first.retrieve(query, self.top_k_first)}
-        second_hits = {h["id"]: h for h in self.second.retrieve(query, self.top_k_second)}
+        first_list = self.first.retrieve(query, self.top_k_first)
+        second_list = self.second.retrieve(query, self.top_k_second)
+        first_hits = {h["id"]: h for h in first_list}
+        second_hits = {h["id"]: h for h in second_list}
+        first_rank = {h["id"]: i + 1 for i, h in enumerate(first_list)}
+        second_rank = {h["id"]: i + 1 for i, h in enumerate(second_list)}
         all_ids = set(first_hits) | set(second_hits)
 
         results = []
+        k = 60.0
         for pid in all_ids:
             h1 = first_hits.get(pid, {})
             h2 = second_hits.get(pid, {})
+            r1 = first_rank.get(pid, 10**9)
+            r2 = second_rank.get(pid, 10**9)
+            rrf = (1.0 / (k + r1)) + (1.0 / (k + r2))
             results.append(
                 {
                     "id": pid,
                     "text": h1.get("text") or h2.get("text", ""),
                     self.first_score_key: self._extract_score(h1, self.first_score_key),
                     self.second_score_key: self._extract_score(h2, self.second_score_key),
+                    "hybrid_rrf_score": float(rrf),
                 }
             )
+        results.sort(
+            key=lambda x: (
+                float(x.get("hybrid_rrf_score", 0.0)),
+                float(x.get(self.first_score_key, 0.0)),
+                float(x.get(self.second_score_key, 0.0)),
+            ),
+            reverse=True,
+        )
         return results
 
     def batch_retrieve(self, queries: List[str]) -> List[List[Dict]]:
@@ -115,8 +147,8 @@ class HybridBm25FaissRetriever(DualHybridRetriever):
         self,
         bm25: BM25Retriever,
         dense: DenseRetriever,
-        top_k_bm25: int = 200,
-        top_k_dense: int = 200,
+        top_k_bm25: int = 50,
+        top_k_dense: int = 50,
     ):
         super().__init__(
             first=bm25,
@@ -128,21 +160,21 @@ class HybridBm25FaissRetriever(DualHybridRetriever):
         )
 
 
-class HybridBioBertDoc2QueryRetriever(DualHybridRetriever):
-    """Union of BioBERT + Doc2Query retrievers."""
+class HybridSpladev3ColbertRetriever(DualHybridRetriever):
+    """Union of SPLADEv3 + ColBERT retrievers."""
 
     def __init__(
         self,
-        biobert: BioBERTRetriever,
-        doc2query: Doc2QueryRetriever,
-        top_k_biobert: int = 200,
-        top_k_doc2query: int = 200,
+        spladev3,
+        colbert,
+        top_k_spladev3: int = 50,
+        top_k_colbert: int = 50,
     ):
         super().__init__(
-            first=biobert,
-            second=doc2query,
-            first_score_key="biobert_score",
-            second_score_key="doc2query_score",
-            top_k_first=top_k_biobert,
-            top_k_second=top_k_doc2query,
+            first=spladev3,
+            second=colbert,
+            first_score_key="spladev3_score",
+            second_score_key="colbert_score",
+            top_k_first=top_k_spladev3,
+            top_k_second=top_k_colbert,
         )

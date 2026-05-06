@@ -24,17 +24,23 @@ pip-wheel-metadata/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.cache/
+.hf_cache/
+.ragatouille/
 
 # ----------------------
 # Project outputs
 # ----------------------
 results/
+*.log
+guardian_server.log
 
 # ----------------------
 # DATA (CRITICAL)
 # ----------------------
 data/
 hf_cache/
+umls_data/
 
 # Large data files
 *.jsonl
@@ -47,3 +53,7 @@ hf_cache/
 # OS / misc
 # ----------------------
 .DS_Store
+
+# Local env files
+.env
+.env.*

@@ -21,18 +21,18 @@ corpus:
   medmcqa_target_passages: 450000
 
 retrieval:
-  top_k_bm25: 25
-  top_k_faiss: 25
-  top_k_dense: 25
-  top_k_biobert: 25
-  top_k_doc2query: 25
-  candidate_pool_size: 50
-  biobert_checkpoint: "dmis-lab/biobert-v1.1"
-  biobert_batch_size: 128
-  biobert_max_length: 512
-  doc2query_model: "doc2query/msmarco-t5-base-v1"
-  doc2query_num_expansions: 4
-  doc2query_max_new_tokens: 24
+  top_k_bm25: 50
+  top_k_faiss: 50
+  top_k_spladev3: 50
+  top_k_colbert: 50
+  # Larger pool improves positive-in-pool recall and gives KG branch room to matter.
+  candidate_pool_size: 100
+  spladev3_encoder: "naver/splade-v3-distilbert"
+  spladev3_batch_size: 256
+  spladev3_max_length: 256
+  colbert_encoder: "colbert-ir/colbertv2.0"
+  colbert_batch_size: 256
+  colbert_max_length: 256
 
 encoder:
   model_name: "NeuML/pubmedbert-base-embeddings"
@@ -40,40 +40,57 @@ encoder:
   max_length: 128
 
 kg:
-  max_path_length: 4
-  max_entities_per_text: 6
+  max_path_length: 6
+  max_entities_per_text: 16
+  # Global exact mode: compute shortest-path distance features for all candidates.
+  exact_distance_features: true
+  # A* compromise: run exact KG distance only on top-N candidates per query.
+  # Keep 0 for production speed; override by CLI for targeted hybrid runs.
+  refine_top_n: 0
 
 model:
   sparse_feat_dim: 3
   dense_feat_dim: 4
   kg_feat_dim: 6
-  branch_hidden: 256
-  controller_hidden: 256
+  # Slightly larger controller/heads for stronger branch balancing.
+  branch_hidden: 512
+  controller_hidden: 512
   query_feat_dim: 768
   # Must match src/common/question_types.ORDERED_QUESTION_TYPES (rank JSONL one-hot axes).
   question_types: ["diagnosis", "treatment", "mechanism", "contraindication", "factoid", "yesno", "other"]
   dropout: 0.2
 
 training:
-  epochs: 10
-  batch_size: 64
+  epochs: 20
+  batch_size: 256
   lr: 2.0e-5
   weight_decay: 1.0e-4
   margin: 1.0
   loss: "softmax"
-  early_stopping_patience: 3
+  early_stopping_patience: 6
   eval_metric: "ndcg@10"
-  num_negatives: 16
-  cudnn_deterministic: false
+  num_negatives: 32
+  # Speed knobs for large rank JSONL training
+  max_pairs_per_query: 8
+  precompute_query_emb: true
+  query_encoder_batch_size: 1024
+  query_emb_cache_path: "data/query_emb_cache_hybrid_train_all.pkl"
+  num_workers: 8
+  cudnn_deterministic: true
 
 evaluation:
   cutoffs: [5, 10, 20]
   question_type_breakdown: true
 
 qa:
-  reader_model: google/flan-t5-large
+  # Causal biomedical LM (Mistral-derived). Falls back to Flan-T5 automatically if you
+  # point reader_model at a seq2seq checkpoint.
+  reader_model: BioMistral/BioMistral-7B
+  # Context window for tokenizer truncation (BioMistral / Mistral often 8k+).
+  reader_max_input_length: 8192
   top_k_passages: 10
-  max_new_tokens: 256
+  # Decoder cap (BioMistral / other causal LMs: 512–2048 is usually enough; raise if outputs truncate).
+  max_new_tokens: 2048
   # Agentic ReAct reader: Thought / Action / Observation with READ_PASSAGE, LIST_SIGNALS, FINAL
   reader_react: false
   reader_react_max_steps: 6

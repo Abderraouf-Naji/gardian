@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sys
 from typing import Dict, List
@@ -12,8 +13,27 @@ import numpy as np
 import torch
 from loguru import logger
 from omegaconf import OmegaConf
+
+
+def _ensure_local_hf_cache() -> None:
+    """
+    Force Hugging Face caches into a project-local writable directory.
+    This avoids permission errors under ~/.cache in shared environments.
+    """
+    cache_root = pathlib.Path(".cache/huggingface").resolve()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    hub = cache_root / "hub"
+    transformers = cache_root / "transformers"
+    hub.mkdir(parents=True, exist_ok=True)
+    transformers.mkdir(parents=True, exist_ok=True)
+    os.environ["HF_HOME"] = str(cache_root)
+    os.environ["HUGGINGFACE_HUB_CACHE"] = str(hub)
+    os.environ["TRANSFORMERS_CACHE"] = str(transformers)
+
+
+_ensure_local_hf_cache()
+
 from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 sys.path.insert(0, ".")
 
@@ -24,12 +44,12 @@ from src.features.sparse import compute_sparse_features
 from src.kg.builder import load_kg
 from src.kg.linker import EntityLinker
 from src.model.gardian import GARDIAN
-from src.pipeline.rag_reader import run_reader_rag_block
+from src.pipeline.rag_reader import load_hf_reader, run_reader_rag_block
 from src.retrieval.bm25 import BM25Retriever
 from src.retrieval.dense import DenseRetriever
-from src.retrieval.biobert import BioBERTRetriever
-from src.retrieval.hybrid import HybridBm25FaissRetriever, HybridBioBertDoc2QueryRetriever
-from src.retrieval.doc2query import Doc2QueryRetriever
+from src.retrieval.hybrid import HybridBm25FaissRetriever, HybridSpladev3ColbertRetriever
+from src.retrieval.spladev3 import SpladeV3Retriever
+from src.retrieval.colbert import ColBERTRetriever
 
 
 def _require_kg_artifacts(cfg) -> None:
@@ -92,7 +112,8 @@ def infer_qtype(question: str, fallback: str) -> str:
         return "mechanism"
     if any(t in q for t in ["contraindication", "interaction", "side effect", "adverse"]):
         return "contraindication"
-    if any(t in q for t in ["is ", "are ", "can ", "does ", "do "]):
+    yesno_starts = ("is ", "are ", "can ", "does ", "do ", "did ", "should ", "could ", "would ", "will ")
+    if q.strip().startswith(yesno_starts):
         return "yesno"
     return "factoid"
 
@@ -111,32 +132,31 @@ def build_hybrid_retriever(cfg):
         bm25=bm25,
         dense=dense,
         top_k_bm25=int(cfg.retrieval.top_k_bm25),
-        top_k_dense=int(cfg.retrieval.top_k_dense),
+        top_k_dense=int(cfg.retrieval.top_k_faiss),
     )
 
 
 def build_hybrid_neural_retriever(cfg):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    biobert = BioBERTRetriever(
-        index_path="data/indices/biobert/unified",
-        checkpoint=cfg.retrieval.get("biobert_checkpoint", "dmis-lab/biobert-v1.1"),
+    spladev3 = SpladeV3Retriever(
+        index_path="data/indices/spladev3/unified",
+        model_name=cfg.retrieval.get("spladev3_encoder", "naver/splade-v3-distilbert"),
         device=device,
-        batch_size=int(cfg.retrieval.get("biobert_batch_size", 32)),
-        max_length=int(cfg.retrieval.get("biobert_max_length", 512)),
+        batch_size=int(cfg.retrieval.get("spladev3_batch_size", 256)),
+        max_length=int(cfg.retrieval.get("spladev3_max_length", 256)),
     )
-    bm25 = BM25Retriever(index_dir="data/indices/bm25/unified")
-    doc2query = Doc2QueryRetriever(
-        bm25=bm25,
-        model_name=cfg.retrieval.get("doc2query_model", "doc2query/msmarco-t5-base-v1"),
+    colbert = ColBERTRetriever(
+        index_path="data/indices/colbert/unified",
+        model_name=cfg.retrieval.get("colbert_encoder", "BAAI/bge-large-en-v1.5"),
         device=device,
-        num_expansions=int(cfg.retrieval.get("doc2query_num_expansions", 4)),
-        max_new_tokens=int(cfg.retrieval.get("doc2query_max_new_tokens", 24)),
+        batch_size=int(cfg.retrieval.get("colbert_batch_size", 256)),
+        max_length=int(cfg.retrieval.get("colbert_max_length", 256)),
     )
-    return HybridBioBertDoc2QueryRetriever(
-        biobert=biobert,
-        doc2query=doc2query,
-        top_k_biobert=int(cfg.retrieval.get("top_k_dense", 200)),
-        top_k_doc2query=int(cfg.retrieval.get("top_k_doc2query", cfg.retrieval.get("top_k_bm25", 200))),
+    return HybridSpladev3ColbertRetriever(
+        spladev3=spladev3,
+        colbert=colbert,
+        top_k_spladev3=int(cfg.retrieval.get("top_k_spladev3", 50)),
+        top_k_colbert=int(cfg.retrieval.get("top_k_colbert", 50)),
     )
 
 
@@ -151,10 +171,23 @@ def load_gardian(cfg, retriever: str, device: str) -> GARDIAN:
         n_qtypes=len(cfg.model.question_types),
         dropout=float(cfg.model.dropout),
     )
-    ckpt_path = pathlib.Path(cfg.paths.results_dir) / f"gardian_best.pt"
+    out_dir = pathlib.Path(cfg.paths.results_dir)
+    ckpt_path = out_dir / f"gardian_best_{retriever}.pt"
     if not ckpt_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-    ckpt = torch.load(ckpt_path, map_location=device)
+        legacy = out_dir / "gardian_best.pt"
+        if legacy.exists():
+            logger.warning(
+                f"Using legacy {legacy.name} ({ckpt_path.name} not found). "
+                "Train per retriever for a matching checkpoint."
+            )
+            ckpt_path = legacy
+        else:
+            raise FileNotFoundError(f"Checkpoint not found: {out_dir / f'gardian_best_{retriever}.pt'}")
+    try:
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+    except TypeError:
+        # Backward compatibility with older torch versions without weights_only.
+        ckpt = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(ckpt["model_state"])
     model.to(device)
     model.eval()
@@ -186,12 +219,7 @@ def main() -> None:
 
     logger.info("Loading GARDIAN + reader model ...")
     gardian = load_gardian(cfg, retriever=args.retriever, device=device)
-    tokenizer = AutoTokenizer.from_pretrained(cfg.qa.reader_model)
-    reader = AutoModelForSeq2SeqLM.from_pretrained(
-        cfg.qa.reader_model,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        device_map="auto",
-    )
+    tokenizer, reader = load_hf_reader(cfg.qa.reader_model, device)
 
     candidates = retriever.retrieve(question)
     candidates = candidates[: int(args.top_candidates)]
@@ -216,7 +244,7 @@ def main() -> None:
         cand["sparse_feats"] = compute_sparse_features(
             query=question,
             passage=cand.get("text", ""),
-            bm25_score=float(cand.get("bm25_score", cand.get("doc2query_score", 0.0))),
+            bm25_score=float(cand.get("bm25_score", cand.get("spladev3_score", 0.0))),
             idf_table=None,
         ).tolist()
         cand["dense_feats"] = compute_dense_features(
@@ -284,6 +312,7 @@ def main() -> None:
         react_max_steps=react_max_steps,
         react_tokens_per_step=react_tokens,
     )
+    answer = (answer or "").strip() or "I don't know"
 
     payload: Dict = {
         "question": question,

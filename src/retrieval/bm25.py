@@ -104,7 +104,7 @@ class BM25Retriever:
         
         logger.info(f"BM25 index saved to {index_dir}")
 
-    def retrieve(self, query: str, top_k: int = 200) -> List[Dict]:
+    def retrieve(self, query: str, top_k: int = 50) -> List[Dict]:
         """Retrieve top-k passages for a query."""
         query_tokens = bm25s.tokenize(query, stopwords="en")
         doc_idxs, scores = self.bm25.retrieve(query_tokens, k=top_k)
@@ -125,7 +125,7 @@ class BM25Retriever:
             )
         return results
 
-    def batch_retrieve(self, queries: List[str], top_k: int = 200) -> List[List[Dict]]:
+    def batch_retrieve(self, queries: List[str], top_k: int = 50) -> List[List[Dict]]:
         """Batch retrieve for multiple queries."""
         q_tokens = bm25s.tokenize(queries, stopwords="en")
         all_idxs, all_scores = self.bm25.retrieve(q_tokens, k=top_k)

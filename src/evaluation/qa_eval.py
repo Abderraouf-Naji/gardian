@@ -1,14 +1,20 @@
 """End-to-end QA evaluation helpers for controlled RAG comparisons."""
 
+import pickle
 import re
+from pathlib import Path
 from collections import defaultdict
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
 from loguru import logger
 
-from src.pipeline.rag_reader import format_reader_context, run_reader_rag_block
+from src.pipeline.rag_reader import (
+    format_reader_context,
+    run_reader_llm_only_block,
+    run_reader_rag_block,
+)
 
 
 def format_context(passages: List[Dict], top_k: int = 5) -> str:
@@ -21,7 +27,159 @@ def extract_citations(answer_text: str) -> List[str]:
     return re.findall(r"\[P(\d+)\]", answer_text)
 
 
+def format_qa_question_for_reader(item: Dict[str, Any]) -> str:
+    """
+    Build the question string shown to the reader.
+
+    MedMCQA rows store the stem in ``question`` and options separately; without
+    expanding A/B/C/D the model often answers ``I don't know``.
+    """
+    q = (item.get("question") or "").strip()
+    ds = str(item.get("dataset") or "")
+    opts = item.get("options")
+    if ds == "medmcqa" and isinstance(opts, dict) and opts:
+        letters = sorted(opts.keys(), key=lambda x: (len(str(x)), str(x)))
+        lines = [q, "", "Options:"]
+        for letter in letters:
+            opt_text = opts.get(letter)
+            if opt_text is not None:
+                lines.append(f"  {letter}. {opt_text}")
+        return "\n".join(lines)
+    return q
+
+
+def reader_task_for_item(item: Dict[str, Any]) -> str:
+    """``yesno`` | ``mcq`` | ``open`` — selects reader prompt templates."""
+    ds = str(item.get("dataset") or "")
+    if ds == "medmcqa":
+        return "mcq"
+    qt = str(item.get("question_type") or "").strip().lower()
+    if qt == "yesno":
+        return "yesno"
+    return "open"
+
+
+def _passage_line_text(r: Dict[str, Any], lookup: Dict[str, str]) -> str:
+    t = r.get("text")
+    if isinstance(t, str) and t.strip():
+        return t
+    pid = r.get("pid")
+    if isinstance(pid, str) and pid:
+        return str(lookup.get(pid) or "")
+    return ""
+
+
+# Lazy encoder only when a qid is missing from the precomputed pickle (e.g. eval-only splits).
+_ST_ENCODER: Dict[str, Any] = {"key": None, "model": None}
+_QUERY_EMB_FALLBACK_WARNED = False
+
+
+def _encode_query_emb_st_fallback(first: Dict[str, Any], cfg: Any, device: str) -> List[float]:
+    """Encode ``question`` with ``cfg.encoder.model_name`` (matches rank-data pipeline)."""
+    global _ST_ENCODER, _QUERY_EMB_FALLBACK_WARNED
+    question = (first.get("question") or "").strip()
+    if not question:
+        raise ValueError("Cannot encode query_emb: missing question on rank row.")
+    if not _QUERY_EMB_FALLBACK_WARNED:
+        logger.warning(
+            "At least one qid is missing from query_emb cache; encoding with "
+            f"{cfg.encoder.model_name!r} on-the-fly. To avoid this, build a pickle that "
+            "includes all splits you evaluate (scripts/12_precompute_query_cache.py on the "
+            "corresponding rank JSONL, then merge or pass the wider file via --query-emb-cache)."
+        )
+        _QUERY_EMB_FALLBACK_WARNED = True
+    key = str(cfg.encoder.model_name)
+    if _ST_ENCODER["key"] != key or _ST_ENCODER["model"] is None:
+        from sentence_transformers import SentenceTransformer
+
+        _ST_ENCODER["key"] = key
+        _ST_ENCODER["model"] = SentenceTransformer(key, device=device)
+    vec = _ST_ENCODER["model"].encode(
+        [question],
+        normalize_embeddings=True,
+        show_progress_bar=False,
+        convert_to_numpy=True,
+    )[0]
+    return [float(x) for x in np.asarray(vec, dtype=np.float32)]
+
+
+def _normalize_query_emb_cache_paths(
+    path: Optional[Union[str, Sequence[str]]],
+) -> List[str]:
+    if path is None:
+        return []
+    if isinstance(path, (list, tuple)):
+        return [str(p).strip() for p in path if str(p).strip()]
+    return [p.strip() for p in str(path).split(",") if p.strip()]
+
+
+def _load_query_emb_cache_file(path: str) -> Dict[str, List[float]]:
+    """Load a single ``qid -> query_emb`` pickle."""
+    if not path:
+        return {}
+    p = Path(path)
+    if not p.is_file():
+        return {}
+    try:
+        with p.open("rb") as f:
+            data = pickle.load(f)
+    except Exception as e:
+        logger.warning(f"Could not load query_emb cache {path}: {e}")
+        return {}
+    if isinstance(data, dict):
+        return {str(k): v for k, v in data.items()}
+    logger.warning(f"Query_emb cache {path} is not a dict; ignoring.")
+    return {}
+
+
+def _load_query_emb_cache(paths: Optional[Union[str, Sequence[str]]]) -> Dict[str, List[float]]:
+    """
+    Load and merge ``qid -> query_emb`` pickles (``scripts/12_precompute_query_cache.py``).
+
+    Multiple paths: comma-separated string, or a sequence of paths. Later entries override
+    earlier ones on duplicate ``qid`` keys (typically disjoint train vs eval caches).
+    """
+    merged: Dict[str, List[float]] = {}
+    for p in _normalize_query_emb_cache_paths(paths):
+        chunk = _load_query_emb_cache_file(p)
+        if chunk:
+            merged.update(chunk)
+    return merged
+
+
+def _resolve_query_emb_vector(
+    candidates: List[Dict[str, Any]],
+    q_emb_by_qid: Dict[str, List[float]],
+    cfg: Any,
+    device: str,
+    *,
+    allow_encode_on_cache_miss: bool = True,
+) -> List[float]:
+    """
+    Prefer inline ``query_emb`` on rank rows, else ``q_emb_by_qid[qid]`` from pickle cache.
+
+    If the qid is still missing (typical when the cache was built from train-only rank JSONL
+    but you evaluate on dev/eval/test), optionally encode ``question`` with ``cfg.encoder``.
+    """
+    first = candidates[0]
+    qe = first.get("query_emb")
+    if isinstance(qe, list) and len(qe) > 0:
+        return [float(x) for x in qe]
+    qid = str(first.get("qid", ""))
+    if qid in q_emb_by_qid:
+        return [float(x) for x in q_emb_by_qid[qid]]
+    if allow_encode_on_cache_miss:
+        return _encode_query_emb_st_fallback(first, cfg, device)
+    raise KeyError(
+        f"No query_emb for qid={qid!r}: rank JSONL rows omit query_emb and qid is missing "
+        f"from query_emb cache. Run scripts/12_precompute_query_cache.py on the rank file(s) "
+        f"or pass a merged cache via --query-emb-cache."
+    )
+
+
 def _bootstrap_ci(values: List[float], n_bootstrap: int = 2000, seed: int = 42) -> Tuple[float, float, float]:
+    """Bootstrap mean and 95% CI; entries ``None`` are skipped (e.g. N/A metrics)."""
+    values = [v for v in values if v is not None]
     if not values:
         return 0.0, 0.0, 0.0
     x = np.asarray(values, dtype=np.float64)
@@ -55,8 +213,14 @@ def _citation_recall(cited_idxs: List[str], passages: List[Dict], gold_ids: List
 
 
 def _unsupported_claim_rate(cited_idxs: List[str], passages: List[Dict], gold_ids: List[str]) -> float:
+    """
+    Fraction of **citation markers** that point to a non-gold passage (or out-of-range).
+
+    When the model emits no ``[P#]`` tags, this is ``0.0`` (no attributed claims to audit),
+    not ``1.0`` — the latter made every no-citation answer look maximally "unsupported".
+    """
     if not cited_idxs:
-        return 1.0
+        return 0.0
     gold_set = set(gold_ids)
     unsupported = 0
     for idx_str in cited_idxs:
@@ -81,11 +245,29 @@ def evaluate_qa_from_rank_records(
     device: str = "cuda",
     bootstrap_samples: int = 2000,
     bootstrap_seed: int = 42,
+    passage_text_by_pid: Optional[Dict[str, str]] = None,
+    query_emb_cache_path: Optional[Union[str, Sequence[str]]] = None,
+    allow_query_emb_encode_on_cache_miss: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, List[Dict[str, Any]]]]:
     """
     Controlled QA eval using pre-generated rank records for each query.
 
-    ``systems`` can include: bm25, dense, hybrid, doc2query, gardian.
+    ``systems`` can include: llm_only, bm25, dense, hybrid, doc2query, gardian.
+
+    ``llm_only`` does not require a non-empty candidate pool; other systems need
+    rank JSONL candidates for the corresponding ``qid``.
+
+    ``passage_text_by_pid``: optional map for rank rows that omit ``text`` (reader
+    context).
+
+    ``query_emb_cache_path``: optional pickle(s) ``qid -> query_emb`` (see
+    ``scripts/12_precompute_query_cache.py``). Pass a comma-separated string or a
+    list of paths to merge caches (e.g. train + eval); later files override earlier
+    on duplicate qids. Used when rank rows omit ``query_emb`` (typical compact JSONL).
+
+    ``allow_query_emb_encode_on_cache_miss``: if True (default), encode the question
+    with ``cfg.encoder.model_name`` when a qid is missing from the pickle (e.g. eval
+    questions not present in ``*_train_all.pkl``).
     """
     by_qid: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for rec in rank_records:
@@ -93,23 +275,46 @@ def evaluate_qa_from_rank_records(
 
     per_system_rows: Dict[str, List[Dict[str, Any]]] = {s: [] for s in systems}
 
+    needs_rank_pool = any(
+        s in systems for s in ("bm25", "dense", "hybrid", "doc2query", "gardian")
+    )
+    text_lookup: Dict[str, str] = dict(passage_text_by_pid or {})
+    q_emb_paths = _normalize_query_emb_cache_paths(query_emb_cache_path)
+    q_emb_by_qid = _load_query_emb_cache(query_emb_cache_path)
+    if q_emb_by_qid and "gardian" in systems:
+        src = ", ".join(q_emb_paths) if q_emb_paths else "?"
+        logger.info(f"QA eval: loaded {len(q_emb_by_qid):,} query embeddings from [{src}]")
+
+    reader_max_input = int(cfg.qa.get("reader_max_input_length", 2048) or 2048)
+
     for item in questions:
         qid = item.get("id")
         candidates = by_qid.get(qid, [])
-        if not candidates:
+        if needs_rank_pool and not candidates:
             continue
         gold_answer = item.get("answer", "")
         gold_ids = item.get("gold_passage_ids", [])
         dataset = item.get("dataset", "")
+        q_reader = format_qa_question_for_reader(item)
+        r_task = reader_task_for_item(item)
 
         scored_cache: Dict[str, List[Tuple[float, Dict[str, Any]]]] = {}
         alpha_triplet = None
-        if "gardian" in systems and gardian_model is not None:
+        if "gardian" in systems and gardian_model is not None and candidates:
             with torch.no_grad():
                 sparse = torch.tensor([r["sparse_feats"] for r in candidates], dtype=torch.float32, device=device)
                 dense = torch.tensor([r["dense_feats"] for r in candidates], dtype=torch.float32, device=device)
                 kg = torch.tensor([r["kg_feats"] for r in candidates], dtype=torch.float32, device=device)
-                query_emb = torch.tensor(candidates[0]["query_emb"], dtype=torch.float32, device=device).unsqueeze(0).expand(len(candidates), -1)
+                qvec = _resolve_query_emb_vector(
+                    candidates,
+                    q_emb_by_qid,
+                    cfg,
+                    device,
+                    allow_encode_on_cache_miss=allow_query_emb_encode_on_cache_miss,
+                )
+                query_emb = torch.tensor(qvec, dtype=torch.float32, device=device).unsqueeze(0).expand(
+                    len(candidates), -1
+                )
                 qtype = torch.tensor(candidates[0]["qtype_onehot"], dtype=torch.float32, device=device).unsqueeze(0).expand(len(candidates), -1)
                 kg_coverage = torch.full((len(candidates),), float(candidates[0]["kg_coverage"]), dtype=torch.float32, device=device)
                 scores, weights, breakdown = gardian_model(
@@ -129,10 +334,14 @@ def evaluate_qa_from_rank_records(
                         float(s),
                         {
                             "id": r["pid"],
-                            "text": r.get("text", ""),
+                            "text": _passage_line_text(r, text_lookup),
+                            "gardian_score": float(s),
                             "sparse_contribution": float(sc),
                             "dense_contribution": float(dc),
                             "kg_contribution": float(kc),
+                            "bm25_score": float(r.get("bm25_score", 0.0)),
+                            "dense_score": float(r.get("dense_score", 0.0)),
+                            "doc2query_score": float(r.get("doc2query_score", 0.0)),
                         },
                     )
                     for s, r, sc, dc, kc in zip(
@@ -147,19 +356,89 @@ def evaluate_qa_from_rank_records(
                     alpha_triplet = [float(x) for x in weights[0].detach().cpu().tolist()]
 
         for system in systems:
+            if system == "llm_only":
+                answer = run_reader_llm_only_block(
+                    question=q_reader,
+                    tokenizer=tokenizer,
+                    reader_model=reader_model,
+                    device=device,
+                    max_new_tokens=int(cfg.qa.max_new_tokens),
+                    max_input_length=reader_max_input,
+                    question_type=item.get("question_type"),
+                    reader_task=r_task,
+                )
+                top_passages: List[Dict[str, Any]] = []
+                # No passages in this baseline — passage-level citation metrics are N/A.
+                row = {
+                    "qid": qid,
+                    "system": system,
+                    "answer": answer,
+                    "accuracy": _check_accuracy(
+                        answer,
+                        gold_answer,
+                        dataset,
+                        gold_letter=item.get("answer_letter"),
+                    ),
+                    "citation_precision": None,
+                    "citation_recall": None,
+                    "unsupported_claim_rate": None,
+                }
+                per_system_rows[system].append(row)
+                continue
+
             if system == "gardian":
                 scored = scored_cache.get("gardian", [])
             elif system == "bm25":
-                scored = [(float(r.get("bm25_score", 0.0)), {"id": r["pid"], "text": r.get("text", "")}) for r in candidates]
+                scored = [
+                    (
+                        float(r.get("bm25_score", 0.0)),
+                        {
+                            "id": r["pid"],
+                            "text": _passage_line_text(r, text_lookup),
+                            "bm25_score": float(r.get("bm25_score", 0.0)),
+                            "dense_score": float(r.get("dense_score", 0.0)),
+                        },
+                    )
+                    for r in candidates
+                ]
             elif system == "dense":
-                scored = [(float(r.get("dense_score", 0.0)), {"id": r["pid"], "text": r.get("text", "")}) for r in candidates]
+                scored = [
+                    (
+                        float(r.get("dense_score", 0.0)),
+                        {
+                            "id": r["pid"],
+                            "text": _passage_line_text(r, text_lookup),
+                            "bm25_score": float(r.get("bm25_score", 0.0)),
+                            "dense_score": float(r.get("dense_score", 0.0)),
+                        },
+                    )
+                    for r in candidates
+                ]
             elif system == "hybrid":
                 scored = [
-                    (float(r.get("bm25_score", 0.0)) + float(r.get("dense_score", 0.0)), {"id": r["pid"], "text": r.get("text", "")})
+                    (
+                        float(r.get("bm25_score", 0.0)) + float(r.get("dense_score", 0.0)),
+                        {
+                            "id": r["pid"],
+                            "text": _passage_line_text(r, text_lookup),
+                            "bm25_score": float(r.get("bm25_score", 0.0)),
+                            "dense_score": float(r.get("dense_score", 0.0)),
+                        },
+                    )
                     for r in candidates
                 ]
             elif system == "doc2query":
-                scored = [(float(r.get("doc2query_score", 0.0)), {"id": r["pid"], "text": r.get("text", "")}) for r in candidates]
+                scored = [
+                    (
+                        float(r.get("doc2query_score", 0.0)),
+                        {
+                            "id": r["pid"],
+                            "text": _passage_line_text(r, text_lookup),
+                            "doc2query_score": float(r.get("doc2query_score", 0.0)),
+                        },
+                    )
+                    for r in candidates
+                ]
             else:
                 continue
 
@@ -168,14 +447,20 @@ def evaluate_qa_from_rank_records(
             if not top_passages:
                 continue
             answer = run_reader_rag_block(
-                question=item["question"],
+                question=q_reader,
                 passages_top_k=top_passages,
                 tokenizer=tokenizer,
                 reader_model=reader_model,
                 device=device,
                 top_k_passages=int(cfg.qa.top_k_passages),
                 max_new_tokens=int(cfg.qa.max_new_tokens),
-                question_type=candidates[0].get("question_type", "other"),
+                max_input_length=reader_max_input,
+                question_type=(
+                    item.get("question_type")
+                    or (candidates[0].get("question_type") if candidates else None)
+                    or "other"
+                ),
+                reader_task=r_task,
                 alpha_sparse=(alpha_triplet[0] if (system == "gardian" and alpha_triplet is not None) else None),
                 alpha_dense=(alpha_triplet[1] if (system == "gardian" and alpha_triplet is not None) else None),
                 alpha_kg=(alpha_triplet[2] if (system == "gardian" and alpha_triplet is not None) else None),
@@ -193,7 +478,12 @@ def evaluate_qa_from_rank_records(
                 "qid": qid,
                 "system": system,
                 "answer": answer,
-                "accuracy": _check_accuracy(answer, gold_answer, dataset),
+                "accuracy": _check_accuracy(
+                    answer,
+                    gold_answer,
+                    dataset,
+                    gold_letter=item.get("answer_letter"),
+                ),
                 "citation_precision": _citation_precision(cited_idxs, top_passages, gold_ids),
                 "citation_recall": _citation_recall(cited_idxs, top_passages, gold_ids),
                 "unsupported_claim_rate": _unsupported_claim_rate(cited_idxs, top_passages, gold_ids),
@@ -229,18 +519,66 @@ def evaluate_qa_from_rank_records(
     return aggregate, per_system_rows
 
 
-def _check_accuracy(pred: str, gold: str, dataset: str) -> float:
-    pred = pred.strip().lower()
+def _pubmedqa_label_in_prediction(pred: str, gold: str) -> bool:
+    """
+    Whether ``pred`` supports gold label ``yes`` / ``no`` / ``maybe``.
+
+    Uses whole-word / explicit-label matching only — substring checks like ``"no" in pred``
+    are wrong because ``"know"`` contains ``"no"`` (e.g. false positives on ``I don't know``).
+
+    If the model follows the prompt and puts the verdict on the **last non-empty line**
+    (``yes`` / ``no`` / ``maybe``), that line wins over incidental words in the body.
+    """
+    pred_raw = pred.strip()
+    pred_l = pred_raw.lower()
     gold = gold.strip().lower()
-    if dataset == "pubmedqa":
-        # yes/no/maybe exact match
-        for label in ["yes", "no", "maybe"]:
-            if label in pred and label == gold:
+    if gold not in ("yes", "no", "maybe"):
+        return False
+    if re.search(rf"(?i)\blabel\s*:\s*{re.escape(gold)}\b", pred_l):
+        return True
+    # "The answer: no." / "Answer: yes" (common Flan-T5 pattern; last explicit verdict wins).
+    ans_spans = list(
+        re.finditer(r"(?i)\b(?:the\s+)?answer\s*:\s*(yes|no|maybe)\b", pred_l)
+    )
+    if ans_spans:
+        return ans_spans[-1].group(1).lower() == gold
+    lines = [ln.strip() for ln in pred_raw.splitlines() if ln.strip()]
+    if lines:
+        last = lines[-1].strip().lower()
+        m = re.match(r"^(yes|no|maybe)[\s.!?,;:]*$", last)
+        if m:
+            return m.group(1) == gold
+        m2 = re.match(r"^(?:(?:the\s+)?answer|label)\s*:\s*(yes|no|maybe)[\s.!?,;:]*$", last, re.I)
+        if m2:
+            return m2.group(1).lower() == gold
+    return bool(re.search(rf"(?i)\b{re.escape(gold)}\b", pred_l))
+
+
+def _check_accuracy(
+    pred: str,
+    gold: str,
+    dataset: str,
+    *,
+    gold_letter: Optional[str] = None,
+) -> float:
+    pred_raw = pred.strip()
+    pred_l = pred_raw.lower()
+    gold_l = gold.strip().lower()
+    # JSONL writers use pubmedqa_labeled / pubmedqa_artificial; keep legacy "pubmedqa".
+    if dataset in ("pubmedqa", "pubmedqa_labeled", "pubmedqa_artificial"):
+        return 1.0 if _pubmedqa_label_in_prediction(pred_raw, gold_l) else 0.0
+    # MedMCQA rows use dataset == "medmcqa"; keep legacy "medqa".
+    if dataset in ("medqa", "medmcqa"):
+        gl = (gold_letter or "").strip().upper()
+        if gl and len(gl) == 1 and gl.isalpha():
+            if re.search(rf"(?i)answer\s*:\s*{re.escape(gl)}\s*[—\-–]", pred_raw):
                 return 1.0
+            if re.search(rf"(?i)answer\s*:\s*{re.escape(gl)}\b", pred_raw):
+                return 1.0
+        g = gold.strip()
+        if g:
+            return 1.0 if re.search(rf"(?i)\b{re.escape(g)}\b", pred_raw) else 0.0
         return 0.0
-    elif dataset == "medqa":
-        # Check if correct option letter/text appears first in answer
-        return 1.0 if gold in pred else 0.0
     return 0.0
 
 

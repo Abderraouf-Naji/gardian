@@ -1,13 +1,16 @@
-"""Paper experiment driver for retriever-family ablations + significance stats."""
+"""Paper experiment driver for retriever-family ablations + significance stats.
+python3 scripts/10_paper_run.py --device cuda --parallel-workers 1 --cuda-devices 0"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
 import pathlib
+import platform
 import subprocess
 import sys
-import platform
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -18,10 +21,8 @@ from omegaconf import OmegaConf
 sys.path.insert(0, ".")
 
 from src.common.question_types import assert_cfg_question_types
-from src.evaluation.rank_jsonl_eval import evaluate_all_from_rank_data
+from src.evaluation.paper_bundle import run_paper_chunk
 from src.evaluation.schemas import validate_paper_bundle
-from src.evaluation.stats import bootstrap_mean_ci, bootstrap_delta_ci, paired_randomization_pvalue
-from src.model.gardian import GARDIAN
 
 torch.set_float32_matmul_precision("high")
 
@@ -30,9 +31,22 @@ DATASET_SPLITS = [
     ("pubmedqa_artificial", "test"),
     ("medmcqa", "test"),
 ]
-RETRIEVER_CHOICES = ["hybrid", "hybrid_neural", "doc2query"]
+RETRIEVER_CHOICES = [
+    "hybrid",
+    "hybrid_neural",
+    "hybrid_bm25_faiss",
+    "hybrid_spladev3_colbert",
+]
 
-ABLATION_CHOICES = ["full", "uniform_alpha", "no_qtype", "no_kg_coverage", "no_kg_signal"]
+ABLATION_CHOICES = [
+    "full",
+    "uniform_alpha",
+    "no_qtype",
+    "no_kg_coverage",
+    "no_sparse_signal",
+    "no_dense_signal",
+    "no_kg_signal",
+]
 
 
 def _git_revision() -> Optional[str]:
@@ -53,68 +67,32 @@ def _git_revision() -> Optional[str]:
     return None
 
 
-def build_model(cfg, device: str, retriever: str) -> GARDIAN:
-    model = GARDIAN(
-        sparse_dim=int(cfg.model.sparse_feat_dim),
-        dense_dim=int(cfg.model.dense_feat_dim),
-        kg_dim=int(cfg.model.kg_feat_dim),
-        branch_hidden=int(cfg.model.branch_hidden),
-        controller_hidden=int(cfg.model.controller_hidden),
-        query_feat_dim=int(cfg.model.query_feat_dim),
-        n_qtypes=len(cfg.model.question_types),
-        dropout=float(cfg.model.dropout),
-    )
-    ckpt_path = pathlib.Path(cfg.paths.results_dir) / f"gardian_best_{retriever}.pt"
-    if not ckpt_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-    ckpt = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(ckpt["model_state"])
-    model.to(device)
-    model.eval()
-    return model
-
-
-def _abl_to_kw(name: str) -> Optional[str]:
-    if name == "full":
-        return None
-    return name
-
-
-def _attach_bootstrap(block: Dict[str, Any], n_boot: int, seed: int) -> None:
-    pq = block.pop("_per_query", None)
-    if not pq or "ndcg@10" not in pq:
-        return
-    mean, lo, hi = bootstrap_mean_ci(pq["ndcg@10"], n_bootstrap=n_boot, seed=seed)
-    block["ndcg@10_query_mean"] = mean
-    block["ndcg@10_bootstrap_ci95"] = [lo, hi]
-    for metric in ["ndcg@5", "ndcg@10", "ndcg@20", "recall@5", "recall@20", "mrr"]:
-        if metric in pq:
-            m, ml, mh = bootstrap_mean_ci(pq[metric], n_bootstrap=n_boot, seed=seed)
-            block[f"{metric}_bootstrap_ci95"] = [ml, mh]
-            block[f"{metric}_query_mean"] = m
-
-
-def _add_delta_tests(raw: Dict[str, Any], n_boot: int, seed: int, n_trials: int) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    g = raw.get("gardian", {})
-    g_pq = g.get("_per_query", {})
-    for baseline in ["dense", "hybrid", "bm25", "doc2query"]:
-        b = raw.get(baseline, {})
-        b_pq = b.get("_per_query", {})
-        if not b_pq or "ndcg@10" not in b_pq or "ndcg@10" not in g_pq:
-            continue
-        d_mean, d_lo, d_hi = bootstrap_delta_ci(
-            g_pq["ndcg@10"], b_pq["ndcg@10"], n_bootstrap=n_boot, seed=seed
-        )
-        pvalue = paired_randomization_pvalue(
-            g_pq["ndcg@10"], b_pq["ndcg@10"], n_trials=n_trials, seed=seed
-        )
-        out[f"gardian_minus_{baseline}_ndcg10"] = {
-            "delta_mean": d_mean,
-            "delta_ci95": [d_lo, d_hi],
-            "paired_randomization_pvalue": pvalue,
-        }
+def _split_contiguous(items: List[str], max_chunks: int) -> List[List[str]]:
+    if not items:
+        return []
+    n = max(1, min(max_chunks, len(items)))
+    k, m = divmod(len(items), n)
+    out: List[List[str]] = []
+    i = 0
+    for j in range(n):
+        take = k + (1 if j < m else 0)
+        out.append(items[i : i + take])
+        i += take
     return out
+
+
+def _parse_cuda_devices(s: str) -> List[int]:
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        return [0]
+    return [int(x) for x in parts]
+
+
+def _merge_chunk_results(target: Dict[str, Any], partial: Dict[str, Dict[str, Any]]) -> None:
+    for ds_name, abl_map in partial.items():
+        if ds_name not in target:
+            target[ds_name] = {}
+        target[ds_name].update(abl_map)
 
 
 def parse_args() -> argparse.Namespace:
@@ -138,13 +116,32 @@ def parse_args() -> argparse.Namespace:
         "--retrievers",
         type=str,
         default="all",
-        help="Comma list from hybrid,hybrid_neural,doc2query or 'all'.",
+        help="Comma list from hybrid_bm25_faiss,hybrid_spladev3_colbert or 'all'.",
     )
     p.add_argument(
         "--randomization-trials",
         type=int,
         default=10000,
         help="Trials for paired randomization test on nDCG@10 deltas.",
+    )
+    p.add_argument(
+        "--device",
+        type=str,
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Execution device.",
+    )
+    p.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=4,
+        help="Number of parallel processes per retriever (ablations split across workers). Use 1 to disable.",
+    )
+    p.add_argument(
+        "--cuda-devices",
+        type=str,
+        default="0,1,2,3",
+        help="Comma-separated GPU ids; worker i uses cuda:ids[i %% len(ids)]. Ignored when device is cpu.",
     )
     return p.parse_args()
 
@@ -154,8 +151,13 @@ def main() -> None:
     cfg = OmegaConf.load(args.cfg)
     assert_cfg_question_types(cfg.model.question_types)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(f"Device: {device}")
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
+    logger.info(f"Device (base): {device}")
+    if args.parallel_workers > 1 and device == "cuda" and not torch.cuda.is_available():
+        raise SystemExit("CUDA requested but torch.cuda.is_available() is False.")
 
     want = [x.strip() for x in args.ablations.split(",") if x.strip()]
     for name in want:
@@ -166,6 +168,11 @@ def main() -> None:
     for r in retrievers:
         if r not in RETRIEVER_CHOICES:
             raise SystemExit(f"Unknown retriever {r!r}. Choose from {RETRIEVER_CHOICES}")
+
+    project_root = str(pathlib.Path(__file__).resolve().parents[1])
+    cfg_abs = str(pathlib.Path(args.cfg).resolve())
+    cuda_ids = _parse_cuda_devices(args.cuda_devices)
+    query_encoder_name = str(cfg.encoder.model_name)
 
     bundle: Dict[str, Any] = {
         "meta": {
@@ -178,45 +185,78 @@ def main() -> None:
             "python_version": sys.version,
             "retrievers": retrievers,
             "randomization_trials": int(args.randomization_trials),
+            "parallel_workers": int(args.parallel_workers),
+            "cuda_devices": cuda_ids if device == "cuda" else None,
         },
         "results": {},
     }
 
+    parallel = int(args.parallel_workers) > 1
+    if parallel and device == "cuda":
+        logger.info(
+            f"Parallel mode: {args.parallel_workers} workers per retriever, CUDA devices {cuda_ids} "
+            "(each worker loads a full model; map one GPU id per worker to avoid OOM)."
+        )
+        if len(cuda_ids) == 1:
+            logger.warning(
+                "All parallel workers use the same GPU id; this often causes CUDA OOM. "
+                "Use e.g. --cuda-devices 0,1,2,3 with four GPUs, or --parallel-workers 1."
+            )
+
     for retriever in retrievers:
         logger.info(f"=== Retriever={retriever} ===")
-        try:
-            model = build_model(cfg, device, retriever)
-        except FileNotFoundError as e:
-            logger.warning(f"Skipping retriever {retriever}: {e}")
+        ckpt_path = pathlib.Path(cfg.paths.results_dir) / f"gardian_best_{retriever}.pt"
+        if not ckpt_path.exists():
+            logger.warning(f"Skipping retriever {retriever}: Checkpoint not found: {ckpt_path}")
             continue
+
         bundle["results"][retriever] = {}
-        for ds_name, split in DATASET_SPLITS:
-            rank_path = f"data/rank_data_{retriever}_{ds_name}_{split}.jsonl"
-            if not pathlib.Path(rank_path).exists():
-                logger.warning(f"Skip missing dataset file: {rank_path}")
-                continue
-            bundle["results"][retriever][ds_name] = {}
-            for abl_name in want:
-                logger.info(f"=== {retriever} | {ds_name} | ablation={abl_name} ===")
-                raw = evaluate_all_from_rank_data(
-                    rank_path,
-                    model,
-                    device,
-                    gardian_ablation=_abl_to_kw(abl_name),
-                    collect_per_query=True,
-                    query_encoder_name=str(cfg.encoder.model_name),
-                    query_encoder_device="cpu",
+        ablation_chunks = _split_contiguous(want, int(args.parallel_workers))
+
+        if not parallel or len(ablation_chunks) <= 1:
+            partial = run_paper_chunk(
+                project_root,
+                retriever,
+                cfg_abs,
+                list(DATASET_SPLITS),
+                want,
+                device,
+                int(args.bootstrap),
+                int(args.seed),
+                int(args.randomization_trials),
+                query_encoder_name,
+            )
+            _merge_chunk_results(bundle["results"][retriever], partial)
+            continue
+
+        ctx = mp.get_context("spawn")
+        futures = []
+        with ProcessPoolExecutor(max_workers=len(ablation_chunks), mp_context=ctx) as pool:
+            for idx, ab_chunk in enumerate(ablation_chunks):
+                vis = (
+                    str(cuda_ids[idx % len(cuda_ids)])
+                    if device == "cuda"
+                    else None
                 )
-                for sys_name, block in raw.items():
-                    if isinstance(block, dict) and "_per_query" in block and args.bootstrap > 0:
-                        _attach_bootstrap(block, n_boot=int(args.bootstrap), seed=int(args.seed))
-                raw["significance"] = _add_delta_tests(
-                    raw,
-                    n_boot=int(args.bootstrap),
-                    seed=int(args.seed),
-                    n_trials=int(args.randomization_trials),
+                futures.append(
+                    pool.submit(
+                        run_paper_chunk,
+                        project_root,
+                        retriever,
+                        cfg_abs,
+                        list(DATASET_SPLITS),
+                        ab_chunk,
+                        device,
+                        int(args.bootstrap),
+                        int(args.seed),
+                        int(args.randomization_trials),
+                        query_encoder_name,
+                        vis,
+                    )
                 )
-                bundle["results"][retriever][ds_name][abl_name] = raw
+            for fut in as_completed(futures):
+                partial = fut.result()
+                _merge_chunk_results(bundle["results"][retriever], partial)
 
     out_path = pathlib.Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

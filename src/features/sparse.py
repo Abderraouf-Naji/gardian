@@ -2,10 +2,12 @@
 Sparse lexical feature vector for a (query, passage) pair.
 
 Features (paper Eq. 3):
-  [0] BM25 score  (pre-computed by retriever)
-  [1] Token overlap count (content words)
-  [2] IDF-weighted token overlap
-  [3] Jaccard similarity over content word sets   ← we add as 4th feature
+  [0] BM25 score (pre-computed by retriever)
+  [1] IDF-weighted overlap over content tokens
+  [2] Jaccard similarity over content word sets
+
+Note: this repo's sparse branch is implemented as a 3-dim vector:
+`[bm25_score, idf_overlap, jaccard]`.
 """
 
 import math, re

@@ -34,6 +34,7 @@ from src.common.question_types import (
     assert_cfg_question_types,
     normalize_question_type,
 )
+from src.common.rank_data_paths import resolve_rank_data_file
 from src.evaluation.stats import bootstrap_mean_ci
 from src.model.gardian import GARDIAN
 
@@ -380,7 +381,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--retriever",
         type=str,
-        choices=["hybrid", "hybrid_neural", "doc2query"],
+        choices=[
+            "hybrid",
+            "hybrid_neural",
+            "hybrid_bm25_biobert",
+            "hybrid_doc2query_faiss",
+            "doc2query",
+        ],
         default="hybrid",
         help="Retriever family to analyze.",
     )
@@ -404,9 +411,9 @@ def main() -> None:
         model = build_model(cfg, device, args.retriever)
 
     default_jobs = [
-        ("pubmedqa_labeled", f"data/rank_data_{args.retriever}_pubmedqa_labeled_eval.jsonl"),
-        ("pubmedqa_artificial", f"data/rank_data_{args.retriever}_pubmedqa_artificial_test.jsonl"),
-        ("medmcqa", f"data/rank_data_{args.retriever}_medmcqa_test.jsonl"),
+        ("pubmedqa_labeled", resolve_rank_data_file(args.retriever, "pubmedqa_labeled", "eval")),
+        ("pubmedqa_artificial", resolve_rank_data_file(args.retriever, "pubmedqa_artificial", "test")),
+        ("medmcqa", resolve_rank_data_file(args.retriever, "medmcqa", "test")),
     ]
     jobs = (
         [("custom", args.rank_data)]

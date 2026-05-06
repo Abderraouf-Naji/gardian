@@ -96,16 +96,19 @@ SOURCES_KEEP = {
     "MEDLINEPLUS",   # MedlinePlus
 }
 
-# Relation types to keep from MRREL
+# Relation types to keep from MRREL.
+# Keep clinically interpretable hierarchy/typed links; drop broad "RO" by default
+# because it can flood the graph with weakly-typed edges.
 RELATIONS_KEEP = {
     "RB",    # Broader
     "RN",    # Narrower
-    "RO",    # Other relationship
     "PAR",   # Parent
     "CHD",   # Child
 }
 
-# Relation attributes (RELA) of high medical value
+# Relation attributes (RELA) of high medical value.
+# IMPORTANT: do NOT keep empty RELA by default in clinical mode; it introduces
+# many generic edges that dilute KG signal for reranking.
 RELA_KEEP = {
     "isa", "inverse_isa",
     "has_finding_site", "finding_site_of",
@@ -114,10 +117,11 @@ RELA_KEEP = {
     "treats", "treated_by",
     "has_ingredient", "ingredient_of",
     "has_contraindication",
+    "contraindicated_with_disease",
+    "contraindicated_with",
     "has_mechanism_of_action",
     "manifestation_of", "has_manifestation",
     "associated_with",
-    "",   # keep empty RELA too (covers most RB/RN/PAR/CHD)
 }
 
 

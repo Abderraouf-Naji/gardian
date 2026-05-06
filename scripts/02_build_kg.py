@@ -75,6 +75,19 @@ def parse_args():
         action="store_true",
         help="When building default without UMLS, do not copy from sources/variants/ (use synthetic only).",
     )
+    p.add_argument(
+        "--force-rebuild-default",
+        action="store_true",
+        help="Delete existing data/kg/default KG files and rebuild from current UMLS settings.",
+    )
+    p.add_argument(
+        "--require-umls-source",
+        action="store_true",
+        help=(
+            "Fail if no UMLS source is configured (prevents bootstrap/synthetic fallback). "
+            "Use for strict clinical builds."
+        ),
+    )
     return p.parse_args()
 
 
@@ -213,7 +226,13 @@ def _bootstrap_default_from_extra(cfg) -> bool:
     return True
 
 
-def _build_single_default(cfg, max_concepts: int, *, allow_bootstrap_from_extra: bool = True):
+def _build_single_default(
+    cfg,
+    max_concepts: int,
+    *,
+    allow_bootstrap_from_extra: bool = True,
+    require_umls_source: bool = False,
+):
     out_pkl, out_lex = _default_single_outputs(cfg)
     _ensure_parent(out_pkl)
     _ensure_parent(out_lex)
@@ -232,6 +251,9 @@ def _build_single_default(cfg, max_concepts: int, *, allow_bootstrap_from_extra:
             out_pkl=out_pkl,
             out_lex=out_lex,
             max_concepts=max_concepts,
+            sources_keep=SOURCES_KEEP,
+            relations_keep=RELATIONS_KEEP,
+            rela_keep=RELA_KEEP,
         )
         return
 
@@ -243,6 +265,7 @@ def _build_single_default(cfg, max_concepts: int, *, allow_bootstrap_from_extra:
             out_pkl,
             out_lex,
             max_concepts=max_concepts,
+            sources_keep=SOURCES_KEEP,
         )
         return
 
@@ -253,12 +276,24 @@ def _build_single_default(cfg, max_concepts: int, *, allow_bootstrap_from_extra:
             out_pkl,
             out_lex,
             max_concepts=max_concepts,
+            sources_keep=SOURCES_KEEP,
+            relations_keep=RELATIONS_KEEP,
+            rela_keep=RELA_KEEP,
         )
         return
 
     if pathlib.Path(out_pkl).is_file() and pathlib.Path(out_lex).is_file():
         logger.info(f"Default KG already present -> {out_pkl} ; skip synthetic/bootstrap.")
         return
+
+    if require_umls_source:
+        raise FileNotFoundError(
+            "require-umls-source enabled but no UMLS source found.\n"
+            "Set one of:\n"
+            "  UMLS_MRCONSO=/path/to/MRCONSO.RRF (+ optional UMLS_MRREL=/path/to/MRREL.RRF)\n"
+            "  UMLS_DIR=/path/to/2025AB/META\n"
+            "  UMLS_MRCONSO_ZIP=/path/to/umls-2025AB-mrconso.zip (nodes-only, no MRREL edges)."
+        )
 
     if allow_bootstrap_from_extra and _bootstrap_default_from_extra(cfg):
         return
@@ -445,10 +480,17 @@ def main():
                     rela_keep=spec["rela_keep"],
                 )
     else:
+        if args.force_rebuild_default:
+            out_pkl, out_lex = _default_single_outputs(cfg)
+            for p in (pathlib.Path(out_pkl), pathlib.Path(out_lex)):
+                if p.exists():
+                    p.unlink()
+                    logger.info(f"[force-rebuild-default] removed {p}")
         _build_single_default(
             cfg,
             max_concepts=args.max_concepts,
             allow_bootstrap_from_extra=not args.no_bootstrap_from_extra,
+            require_umls_source=bool(args.require_umls_source),
         )
 
 

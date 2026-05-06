@@ -1,13 +1,13 @@
 import os
 import json
 import pathlib
-import random
 import subprocess
 import sys
 import hashlib
 import platform
 from datetime import datetime, timezone
 from typing import Optional
+import csv
 
 os.environ.setdefault("PYTHONUTF8", "1")
 
@@ -18,9 +18,28 @@ from loguru import logger
 from omegaconf import OmegaConf
 
 from src.common.question_types import assert_cfg_question_types
+from src.common.rank_data_paths import (
+    normalize_retriever_name,
+    rank_data_combined_file,
+    resolve_rank_data_file,
+)
 from src.common.repro import set_global_seed
 from src.model.gardian import GARDIAN
 from src.training.trainer import GARDIANTrainer
+
+HYBRID_RETRIEVER_COMBINATIONS = {
+    "hybrid_bm25_faiss": "BM25 + FAISS",
+    "hybrid_spladev3_colbert": "SPLADEv3 + ColBERT",
+}
+
+ALL_TRAIN_RETRIEVERS = [
+    "hybrid_bm25_faiss",
+    "hybrid_spladev3_colbert",
+    "spladev3",
+    "bm25",
+    "faiss",
+    "colbert",
+]
 
 
 def _git_revision() -> Optional[str]:
@@ -82,31 +101,6 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def _read_rank_by_qid(path: str):
-    by_qid = {}
-    if not os.path.exists(path):
-        return by_qid
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            rec = json.loads(line)
-            qid = rec.get("qid")
-            by_qid.setdefault(qid, []).append(rec)
-    return by_qid
-
-
-def _write_rank_groups(path: str, groups) -> int:
-    pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
-    n_lines = 0
-    with open(path, "w", encoding="utf-8") as f:
-        for g in groups:
-            for rec in g:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                n_lines += 1
-    return n_lines
-
-
 def _validate_feature_dims(path: str, cfg) -> None:
     expected_sparse = int(cfg.model.sparse_feat_dim)
     expected_dense = int(cfg.model.dense_feat_dim)
@@ -133,62 +127,43 @@ def _validate_feature_dims(path: str, cfg) -> None:
             break
 
 
-def create_balanced_rank_files(train_path: str, dev_path: str, retriever: str):
-    """
-    Create balanced merged train/dev rank-data files.
-    Downsample PubMedQA to match MedMCQA for better generalization.
-    """
-    # Load individual files
-    pubmedqa_train = f"data/rank_data_{retriever}_pubmedqa_artificial_train.jsonl"
-    medmcqa_train = f"data/rank_data_{retriever}_medmcqa_train.jsonl"
-    pubmedqa_dev = f"data/rank_data_{retriever}_pubmedqa_artificial_dev.jsonl"
-    medmcqa_dev = f"data/rank_data_{retriever}_medmcqa_dev.jsonl"
-    
-    # Count lines with explicit encoding
-    pubmedqa_train_lines = count_lines(pubmedqa_train)
-    medmcqa_train_lines = count_lines(medmcqa_train)
-    
-    logger.info(f"Original sizes - PubMedQA: {pubmedqa_train_lines:,}, MedMCQA: {medmcqa_train_lines:,}")
-    if pubmedqa_train_lines == 0 or medmcqa_train_lines == 0:
-        logger.warning(
-            "Missing/empty train rank-data files for balancing: "
-            f"{pubmedqa_train} ({pubmedqa_train_lines}), "
-            f"{medmcqa_train} ({medmcqa_train_lines})"
-        )
-        return train_path, dev_path
-    
-    pub_groups = _read_rank_by_qid(pubmedqa_train)
-    med_groups = _read_rank_by_qid(medmcqa_train)
-    pub_qids = list(pub_groups.keys())
-    med_qids = list(med_groups.keys())
-    logger.info(f"Original queries - PubMedQA: {len(pub_qids):,}, MedMCQA: {len(med_qids):,}")
-    if not pub_qids or not med_qids:
-        logger.warning("Could not build query-level balanced train file; missing query groups.")
-        return train_path, dev_path
-    target_q = len(med_qids)
-    sample_q = min(target_q, len(pub_qids))
-    logger.info(f"Target query count from PubMedQA: {sample_q:,}")
+def _existing(paths):
+    return [p for p in paths if os.path.exists(p) and count_lines(p) > 0]
 
-    balanced_train_path = train_path
 
-    if not os.path.exists(balanced_train_path):
-        logger.info("Creating balanced training data...")
-        sampled_pub_qids = set(random.sample(pub_qids, sample_q))
-        sampled_groups = [pub_groups[qid] for qid in pub_qids if qid in sampled_pub_qids]
-        sampled_groups.extend(med_groups[qid] for qid in med_qids)
-        random.shuffle(sampled_groups)
-        n_lines = _write_rank_groups(balanced_train_path, sampled_groups)
-        logger.info(f"Created balanced training with {n_lines:,} lines")
-        logger.info(f"  PubMedQA sampled queries: {len(sampled_pub_qids):,}")
-        logger.info(f"  MedMCQA queries: {len(med_qids):,}")
+def create_combined_rank_files(retriever: str, include_eval_in_dev: bool = False):
+    """
+    Build train/dev files from real generated rank-data across datasets.
+    """
+    datasets = ["pubmedqa_artificial", "medmcqa", "pubmedqa_labeled"]
+    train_candidates = [resolve_rank_data_file(retriever, ds, "train") for ds in datasets]
+    dev_candidates = [resolve_rank_data_file(retriever, ds, "dev") for ds in datasets]
+    if include_eval_in_dev:
+        dev_candidates += [resolve_rank_data_file(retriever, ds, "eval") for ds in datasets]
+
+    train_sources = _existing(train_candidates)
+    dev_sources = _existing(dev_candidates)
+
+    train_path = rank_data_combined_file(retriever, "train_all")
+    dev_path = rank_data_combined_file(retriever, "dev_all")
+
+    if train_sources:
+        logger.info(f"Combining train files for {retriever}: {train_sources}")
+        concat_files(train_sources, train_path)
     else:
-        logger.info(f"Using existing training file: {balanced_train_path}")
-    
-    # Keep dev as is (or also balance)
-    if not os.path.exists(dev_path):
-        concat_files([pubmedqa_dev, medmcqa_dev], dev_path)
-    
-    return balanced_train_path, dev_path
+        logger.warning(f"No train rank-data sources found for retriever={retriever}")
+
+    if dev_sources:
+        logger.info(f"Combining dev/eval/test files for {retriever}: {dev_sources}")
+        concat_files(dev_sources, dev_path)
+    else:
+        logger.warning(f"No dev/eval/test rank-data sources found for retriever={retriever}")
+
+    return train_path, dev_path, train_sources, dev_sources
+
+
+def _default_query_cache_path(retriever: str) -> str:
+    return f"data/query_emb_cache_{retriever}_train_all.pkl"
 
 
 def main():
@@ -198,14 +173,46 @@ def main():
     parser.add_argument(
         "--retriever",
         type=str,
-        choices=["hybrid", "hybrid_neural", "doc2query", "all"],
+        choices=[*ALL_TRAIN_RETRIEVERS, "all"],
         default="all",
-        help="Retriever rank-data family to train on",
+        help=(
+            "Retriever rank-data family to train on. "
+            "Hybrid combos: "
+            "hybrid_bm25_faiss(BM25+FAISS), "
+            "hybrid_spladev3_colbert(SPLADEv3+ColBERT)."
+        ),
+    )
+    parser.add_argument(
+        "--include-eval-in-dev",
+        action="store_true",
+        help=(
+            "Also include *_eval rank files in the dev set. "
+            "Test splits are never used for dev."
+        ),
+    )
+    parser.add_argument(
+        "--no-auto-cache-path",
+        action="store_true",
+        help=(
+            "Disable retriever-specific auto cache path override for "
+            "training.query_emb_cache_path."
+        ),
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Optional override for training.epochs from configs/base.yaml (e.g., 20).",
     )
     args = parser.parse_args()
 
     cfg = OmegaConf.load("configs/base.yaml")
     assert_cfg_question_types(cfg.model.question_types)
+    if args.epochs is not None:
+        if int(args.epochs) <= 0:
+            raise ValueError("--epochs must be > 0")
+        cfg.training.epochs = int(args.epochs)
+        logger.info(f"Overriding cfg.training.epochs -> {cfg.training.epochs}")
     cudnn_det = bool(getattr(cfg.training, "cudnn_deterministic", False))
     set_global_seed(int(cfg.seed), cudnn_deterministic=cudnn_det)
 
@@ -217,20 +224,38 @@ def main():
         device = "cpu"
         logger.warning("Training on: cpu — CUDA not detected.")
 
-    retrievers = ["hybrid", "hybrid_neural", "doc2query"] if args.retriever == "all" else [args.retriever]
+    retrievers = (
+        ALL_TRAIN_RETRIEVERS
+        if args.retriever == "all"
+        else [normalize_retriever_name(args.retriever)]
+    )
     out_dir = pathlib.Path(cfg.paths.results_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     summary = {}
+
+    logger.info("Hybrid retriever combinations (explicit):")
+    for name, combo in HYBRID_RETRIEVER_COMBINATIONS.items():
+        logger.info(f"  - {name}: {combo}")
 
     for retriever in retrievers:
         logger.info("=" * 72)
         logger.info(f"Training for retriever family: {retriever}")
         logger.info("=" * 72)
 
-        # ── Data with balanced sampling ─────────────────────────────────────
-        train_path = f"data/rank_data_{retriever}_train_balanced.jsonl"
-        dev_path = f"data/rank_data_{retriever}_dev.jsonl"
-        train_path, dev_path = create_balanced_rank_files(train_path, dev_path, retriever)
+        # ── Data from real generated rank files (all datasets) ─────────────
+        train_path, dev_path, train_sources, dev_sources = create_combined_rank_files(
+            retriever,
+            include_eval_in_dev=bool(args.include_eval_in_dev),
+        )
+        auto_cache_path = _default_query_cache_path(retriever)
+        if not bool(args.no_auto_cache_path):
+            cfg.training.query_emb_cache_path = auto_cache_path
+            logger.info(f"Using retriever-specific query_emb cache: {auto_cache_path}")
+        if not os.path.exists(str(cfg.training.query_emb_cache_path)):
+            logger.warning(
+                f"query_emb cache not found: {cfg.training.query_emb_cache_path} "
+                f"(recommended: precompute before training for retriever={retriever})"
+            )
         _validate_feature_dims(train_path, cfg)
         _validate_feature_dims(dev_path, cfg)
 
@@ -276,6 +301,50 @@ def main():
         trainer = GARDIANTrainer(model, cfg, device=device)
         best_ndcg10 = trainer.fit(train_path, dev_path)
 
+        # ── Persist epoch-by-epoch training logs (always) ───────────────────
+        training_log_dir = out_dir / "gardian_training" / retriever
+        training_log_dir.mkdir(parents=True, exist_ok=True)
+        epoch_logs_path = training_log_dir / "epoch_logs.jsonl"
+        epoch_csv_path = training_log_dir / "epoch_logs.csv"
+        run_summary_path = training_log_dir / "run_summary.json"
+
+        with open(epoch_logs_path, "w", encoding="utf-8") as f:
+            for row in trainer.epoch_logs:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        csv_fields = [
+            "epoch",
+            "train_loss",
+            "did_eval",
+            "dev_ndcg@10",
+            "is_best",
+            "best_ndcg@10_so_far",
+            "patience_counter",
+            "epoch_elapsed_sec",
+        ]
+        with open(epoch_csv_path, "w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=csv_fields)
+            w.writeheader()
+            for row in trainer.epoch_logs:
+                w.writerow(row)
+
+        run_summary = {
+            "retriever": retriever,
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "best_ndcg10": float(best_ndcg10),
+            "epochs_completed": len(trainer.epoch_logs),
+            "train_path": train_path,
+            "dev_path": dev_path,
+            "query_emb_cache_path": str(getattr(cfg.training, "query_emb_cache_path", "")),
+            "epoch_logs_jsonl": str(epoch_logs_path),
+            "epoch_logs_csv": str(epoch_csv_path),
+        }
+        with open(run_summary_path, "w", encoding="utf-8") as f:
+            json.dump(run_summary, f, indent=2, ensure_ascii=False)
+        logger.info(f"Saved epoch logs -> {epoch_logs_path}")
+        logger.info(f"Saved epoch CSV -> {epoch_csv_path}")
+        logger.info(f"Saved run summary -> {run_summary_path}")
+
         # ── Checkpoint ───────────────────────────────────────────────────────
         ckpt_path = out_dir / f"gardian_best_{retriever}.pt"
         torch.save(
@@ -295,6 +364,12 @@ def main():
             "checkpoint": str(ckpt_path),
             "train_path": train_path,
             "dev_path": dev_path,
+            "train_sources": train_sources,
+            "dev_sources": dev_sources,
+            "training_log_dir": str(training_log_dir),
+            "epoch_logs_jsonl": str(epoch_logs_path),
+            "epoch_logs_csv": str(epoch_csv_path),
+            "run_summary": str(run_summary_path),
         }
         logger.success(f"Done ({retriever}) | best nDCG@10={best_ndcg10:.4f} | checkpoint -> {ckpt_path}")
 
@@ -315,8 +390,8 @@ def main():
         "input_files": {},
     }
     for retriever in retrievers:
-        p_train = f"data/rank_data_{retriever}_train_balanced.jsonl"
-        p_dev = f"data/rank_data_{retriever}_dev.jsonl"
+        p_train = rank_data_combined_file(retriever, "train_all")
+        p_dev = rank_data_combined_file(retriever, "dev_all")
         manifest["input_files"][p_train] = {"exists": os.path.exists(p_train), "sha256": _sha256_file(p_train)}
         manifest["input_files"][p_dev] = {"exists": os.path.exists(p_dev), "sha256": _sha256_file(p_dev)}
     manifest_path = out_dir / "training_manifest.json"

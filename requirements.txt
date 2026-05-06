@@ -17,5 +17,6 @@ omegaconf>=2.3.0
 nltk>=3.8.0
 pytest>=8.0.0
 colbert-ir>=0.2.0
+ragatouille>=0.0.8
 huggingface_hub>=0.24.0
 accelerate

@@ -27,12 +27,16 @@ data/indices/<corpus_name>/faiss.index
 data/indices/<corpus_name>/faiss_meta.jsonl
 
 Unified:
-data/indices/unified/bm25/
-data/indices/unified/faiss.index
-data/indices/unified/faiss_meta.jsonl
+data/indices/bm25/unified/
+data/indices/faiss/unified/faiss.index
+data/indices/faiss/unified/faiss_meta.jsonl
 data/indices/unified/corpus_unified.jsonl
+
+If unified BM25 exists but FAISS is missing, run:
+  python scripts/01_Build_bm25_faiss_indices.py --unified-faiss-only
 """
 
+import argparse
 import json
 import pathlib
 import shutil
@@ -287,13 +291,59 @@ def build_indices_for_corpus(
     logger.success(f"Finished building indices for corpus: {corpus_name}")
 
 
+def build_unified_faiss_only(cfg) -> None:
+    """
+    Encode ``data/indices/unified/corpus_unified.jsonl`` and write only
+    ``data/indices/faiss/unified/faiss.index`` (+ meta). Skips BM25 and
+    per-corpus indices. Use when unified BM25 exists but FAISS is missing.
+    """
+    indices_dir = pathlib.Path("data/indices")
+    if not UNIFIED_CORPUS_PATH.is_file():
+        raise FileNotFoundError(
+            f"Unified corpus not found: {UNIFIED_CORPUS_PATH}\n"
+            "Run this script without --unified-faiss-only first, or merge corpora into that path."
+        )
+    validate_corpus(UNIFIED_CORPUS_PATH)
+    ensure_output_dirs(indices_dir, UNIFIED_NAME)
+    _, faiss_index_path, faiss_meta_path = get_index_paths(indices_dir, UNIFIED_NAME)
+    encoder_name = str(cfg.encoder.model_name)
+    batch_size = int(cfg.encoder.batch_size)
+    logger.info("=" * 72)
+    logger.info("Unified FAISS only (skipping BM25 and per-corpus builds)")
+    logger.info("=" * 72)
+    logger.info(f"Corpus JSONL : {UNIFIED_CORPUS_PATH}")
+    logger.info(f"FAISS path   : {faiss_index_path}")
+    logger.info(f"Meta path    : {faiss_meta_path}")
+    build_faiss_index(
+        corpus_jsonl=str(UNIFIED_CORPUS_PATH),
+        faiss_path=str(faiss_index_path),
+        meta_path=str(faiss_meta_path),
+        encoder_name=encoder_name,
+        batch_size=batch_size,
+    )
+    logger.success(f"Unified FAISS index ready: {faiss_index_path}")
+
+
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Build BM25 + FAISS indices (per corpus and unified).")
+    parser.add_argument(
+        "--unified-faiss-only",
+        action="store_true",
+        help="Only build FAISS for data/indices/unified/corpus_unified.jsonl (matches hybrid in 08_ask_gardian).",
+    )
+    args = parser.parse_args()
+
     cfg = OmegaConf.load("configs/base.yaml")
     indices_dir = pathlib.Path("data/indices")
+
+    if args.unified_faiss_only:
+        build_unified_faiss_only(cfg)
+        return
+
     organize_existing_index_artifacts(indices_dir, list(CORPORA.keys()) + [UNIFIED_NAME])
 
     encoder_name = str(cfg.encoder.model_name)

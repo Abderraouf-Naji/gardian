@@ -63,7 +63,7 @@ class DenseRetriever:
         )
         return np.asarray(vecs, dtype="float32")
 
-    def retrieve(self, query: str, top_k: int = 200) -> List[Dict]:
+    def retrieve(self, query: str, top_k: int = 50) -> List[Dict]:
         """Retrieve top-k passages for a query."""
         q_vec = self._encode([query])
         scores, indices = self.index.search(q_vec, top_k)
@@ -84,7 +84,7 @@ class DenseRetriever:
             )
         return results
 
-    def batch_retrieve(self, queries: List[str], top_k: int = 200) -> List[List[Dict]]:
+    def batch_retrieve(self, queries: List[str], top_k: int = 50) -> List[List[Dict]]:
         """Batch retrieve for multiple queries."""
         q_vecs = self._encode(queries)
         all_scores, all_indices = self.index.search(q_vecs, top_k)

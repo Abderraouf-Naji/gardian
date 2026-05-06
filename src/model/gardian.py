@@ -118,6 +118,10 @@ class GARDIAN(nn.Module):
             - ``uniform_alpha`` — fix (α,β,γ)=(⅓,⅓,⅓).
             - ``no_qtype`` — zero question-type one-hot before the controller.
             - ``no_kg_coverage`` — zero KG coverage scalar before the controller.
+            - ``no_sparse_signal`` — drop sparse branch at fusion; dense/KG
+              masses are renormalized to sum to 1.
+            - ``no_dense_signal`` — drop dense branch at fusion; sparse/KG
+              masses are renormalized to sum to 1.
             - ``no_kg_signal`` — controller unchanged, but fusion drops the KG
               branch; sparse/dense masses are renormalized to sum to 1.
 
@@ -148,6 +152,48 @@ class GARDIAN(nn.Module):
             )
         else:
             weights = self.controller(query_emb, qtype_in, kg_cov_in)
+
+        if ablation == "no_sparse_signal":
+            w = weights
+            denom = w[:, 1] + w[:, 2] + 1e-8
+            b = w[:, 1] / denom
+            g = w[:, 2] / denom
+            scores = b * s_dense + g * s_kg
+            weights = torch.stack([torch.zeros_like(b), b, g], dim=1)
+            if return_breakdown:
+                dense_contrib = b * s_dense
+                kg_contrib = g * s_kg
+                sparse_contrib = torch.zeros_like(dense_contrib)
+                return scores, weights, {
+                    "s_sparse": s_sparse,
+                    "s_dense": s_dense,
+                    "s_kg": s_kg,
+                    "sparse_contrib": sparse_contrib,
+                    "dense_contrib": dense_contrib,
+                    "kg_contrib": kg_contrib,
+                }
+            return scores, weights
+
+        if ablation == "no_dense_signal":
+            w = weights
+            denom = w[:, 0] + w[:, 2] + 1e-8
+            a = w[:, 0] / denom
+            g = w[:, 2] / denom
+            scores = a * s_sparse + g * s_kg
+            weights = torch.stack([a, torch.zeros_like(a), g], dim=1)
+            if return_breakdown:
+                sparse_contrib = a * s_sparse
+                kg_contrib = g * s_kg
+                dense_contrib = torch.zeros_like(sparse_contrib)
+                return scores, weights, {
+                    "s_sparse": s_sparse,
+                    "s_dense": s_dense,
+                    "s_kg": s_kg,
+                    "sparse_contrib": sparse_contrib,
+                    "dense_contrib": dense_contrib,
+                    "kg_contrib": kg_contrib,
+                }
+            return scores, weights
 
         if ablation == "no_kg_signal":
             w = weights

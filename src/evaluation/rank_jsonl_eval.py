@@ -71,11 +71,39 @@ def _aggregate_lists(
 def _new_query_bucket() -> Dict[str, Any]:
     return {
         "candidates": [],
-        "bm25_scores": [],
+        "sparse_scores": [],
         "dense_scores": [],
-        "hybrid_scores": [],
-        "doc2query_scores": [],
+        "fusion_scores": [],
+        "spladev3_scores": [],
     }
+
+
+def _infer_rank_retriever_type(records: List[Dict[str, Any]]) -> str:
+    for rec in records:
+        rt = str(rec.get("retriever_type", "")).strip()
+        if rt:
+            return rt
+    return ""
+
+
+def _baseline_result_keys(
+    retriever_type: str, *, canonical_baseline_keys: bool
+) -> Tuple[str, str, str]:
+    """Map rank-file retriever_type to metric dict keys for sparse / dense / sum baselines."""
+    rt = (retriever_type or "").strip()
+    if not canonical_baseline_keys or not rt:
+        return "bm25", "dense", "hybrid"
+    mapping: Dict[str, Tuple[str, str, str]] = {
+        "bm25": ("sparse(bm25)", "dense(none)", "sparse(bm25)"),
+        "faiss": ("sparse(none)", "dense(faiss)", "dense(faiss)"),
+        "colbert": ("sparse(none)", "dense(colbert)", "dense(colbert)"),
+        "spladev3": ("sparse(spladev3)", "dense(none)", "sparse(spladev3)"),
+        "hybrid": ("sparse(bm25)", "dense(faiss)", "sum(bm25,faiss)"),
+        "hybrid_neural": ("sparse(spladev3)", "dense(colbert)", "sum(spladev3,colbert)"),
+        "hybrid_bm25_faiss": ("sparse(bm25)", "dense(faiss)", "sum(bm25,faiss)"),
+        "hybrid_spladev3_colbert": ("sparse(spladev3)", "dense(colbert)", "sum(spladev3,colbert)"),
+    }
+    return mapping.get(rt, ("bm25", "dense", "hybrid"))
 
 
 def _score_key_has_nonzero_signal(
@@ -88,6 +116,89 @@ def _score_key_has_nonzero_signal(
     return False
 
 
+def _rrf_scores_for_query(
+    sparse_scores: List[float],
+    dense_scores: List[float],
+    *,
+    rrf_k: int = 60,
+) -> List[float]:
+    """Compute per-candidate RRF scores from sparse and dense rankings."""
+    if len(sparse_scores) != len(dense_scores):
+        raise ValueError("RRF score lists must have equal length.")
+    sparse_rank_order = np.argsort(np.asarray(sparse_scores))[::-1]
+    dense_rank_order = np.argsort(np.asarray(dense_scores))[::-1]
+    sparse_rank = {int(idx): rank + 1 for rank, idx in enumerate(sparse_rank_order)}
+    dense_rank = {int(idx): rank + 1 for rank, idx in enumerate(dense_rank_order)}
+    out: List[float] = []
+    for idx in range(len(sparse_scores)):
+        rs = sparse_rank[idx]
+        rd = dense_rank[idx]
+        out.append((1.0 / (rrf_k + rs)) + (1.0 / (rrf_k + rd)))
+    return out
+
+
+def _prefill_query_emb_cache(
+    records: List[Dict[str, Any]],
+    *,
+    query_encoder_name: str,
+    query_encoder_device: str,
+    model_query_dim: Optional[int],
+    batch_size: int = 128,
+) -> Dict[str, List[float]]:
+    """Fill query id → embedding from JSONL or one batched SentenceTransformer pass."""
+    cache: Dict[str, List[float]] = {}
+    for rec in records:
+        qid = str(rec.get("qid", ""))
+        qe = rec.get("query_emb")
+        if isinstance(qe, list) and qe:
+            if qid not in cache:
+                cache[qid] = qe
+
+    need_encode: Dict[str, str] = {}
+    for rec in records:
+        qid = str(rec.get("qid", ""))
+        if qid in cache:
+            continue
+        question = rec.get("question")
+        if isinstance(question, str) and question.strip():
+            need_encode.setdefault(qid, question.strip())
+
+    if not need_encode:
+        return cache
+
+    logger.info(
+        f"Encoding {len(need_encode)} unique queries in batches of {batch_size} "
+        f"({query_encoder_name!r} on {query_encoder_device!r})..."
+    )
+    enc = SentenceTransformer(query_encoder_name, device=query_encoder_device)
+    pairs = list(need_encode.items())
+    qids = [p[0] for p in pairs]
+    questions = [p[1] for p in pairs]
+    batch_starts = range(0, len(questions), batch_size)
+    for start in tqdm(
+        batch_starts,
+        desc="Query embedding batches",
+        leave=False,
+        unit="batch",
+    ):
+        batch_q = questions[start : start + batch_size]
+        batch_ids = qids[start : start + batch_size]
+        embs = enc.encode(
+            batch_q,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        for qid, row in zip(batch_ids, embs):
+            emb = row.tolist()
+            if model_query_dim is not None and len(emb) != int(model_query_dim):
+                raise ValueError(
+                    f"Recomputed query_emb dim mismatch during eval: got={len(emb)} expected={model_query_dim}"
+                )
+            cache[qid] = emb
+    return cache
+
+
 def evaluate_all_from_rank_data(
     rank_data_path: str,
     model: Optional[GARDIAN] = None,
@@ -97,11 +208,17 @@ def evaluate_all_from_rank_data(
     collect_per_query: bool = False,
     query_encoder_name: Optional[str] = None,
     query_encoder_device: str = "cpu",
+    canonical_baseline_keys: bool = False,
 ) -> Dict[str, Any]:
     """
     Mean metrics over queries; optionally per-query lists for bootstrap CIs.
 
     ``gardian_ablation`` is passed to ``GARDIAN.forward(..., ablation=...)``.
+
+    When ``canonical_baseline_keys`` is True (paper bundle), baseline metric keys
+    reflect the actual first-stage channels (e.g. ``sparse(doc2query)``,
+    ``dense(biobert)``, ``sum(doc2query,biobert)``) instead of generic
+    ``bm25`` / ``dense`` / ``hybrid``.
     """
     logger.info(f"Loading rank data: {rank_data_path}")
     records = load_rank_jsonl(rank_data_path)
@@ -117,8 +234,15 @@ def evaluate_all_from_rank_data(
                 model_query_dim = int(first_layer[0].in_features) - int(qtype_dim) - 1
         except Exception:
             model_query_dim = None
-    query_encoder = None
     query_emb_cache: Dict[str, List[float]] = {}
+    if model is not None and device is not None and query_encoder_name:
+        query_emb_cache = _prefill_query_emb_cache(
+            records,
+            query_encoder_name=query_encoder_name,
+            query_encoder_device=query_encoder_device,
+            model_query_dim=model_query_dim,
+        )
+    query_encoder = None
 
     def _resolve_query_emb(rec: Dict[str, Any]) -> List[float]:
         query_emb = rec.get("query_emb")
@@ -165,17 +289,45 @@ def evaluate_all_from_rank_data(
         }
     )
 
+    def _resolve_sparse_score(rec: Dict[str, Any]) -> float:
+        # Prefer explicit retriever score fields when available.
+        retriever_type = str(rec.get("retriever_type", ""))
+        if retriever_type in {"faiss", "colbert"}:
+            return 0.0
+        if retriever_type in {"hybrid", "hybrid_bm25_faiss", "bm25"}:
+            if rec.get("bm25_score") is not None:
+                return float(rec.get("bm25_score", 0.0))
+        if retriever_type in {"hybrid_neural", "hybrid_spladev3_colbert", "spladev3"}:
+            if rec.get("spladev3_score") is not None:
+                return float(rec.get("spladev3_score", 0.0))
+        sparse_feats = rec.get("sparse_feats") or [0.0]
+        return float(sparse_feats[0] if sparse_feats else 0.0)
+
+    def _resolve_dense_score(rec: Dict[str, Any]) -> float:
+        if "dense_score" in rec:
+            return float(rec["dense_score"])
+        retriever_type = str(rec.get("retriever_type", ""))
+        if retriever_type in ("bm25", "spladev3"):
+            return 0.0
+        dense_feats = rec.get("dense_feats") or [0.0]
+        return float(dense_feats[0] if dense_feats else 0.0)
+
+    rank_retriever_type = _infer_rank_retriever_type(records)
+    sparse_key, dense_key, fusion_key = _baseline_result_keys(
+        rank_retriever_type, canonical_baseline_keys=canonical_baseline_keys
+    )
+
     for rec in records:
         qid = rec["qid"]
-        bm25_score = rec["sparse_feats"][0] if rec.get("sparse_feats") else 0
-        dense_score = rec["dense_feats"][0] if rec.get("dense_feats") else 0
-        hybrid_score = float(bm25_score) + float(dense_score)
+        sparse_score = _resolve_sparse_score(rec)
+        dense_score = _resolve_dense_score(rec)
+        fusion_score = float(sparse_score) + float(dense_score)
 
         queries[qid]["candidates"].append({"pid": rec["pid"], "label": rec["label"]})
-        queries[qid]["bm25_scores"].append(bm25_score)
+        queries[qid]["sparse_scores"].append(sparse_score)
         queries[qid]["dense_scores"].append(dense_score)
-        queries[qid]["hybrid_scores"].append(hybrid_score)
-        queries[qid]["doc2query_scores"].append(float(rec.get("doc2query_score", 0.0)))
+        queries[qid]["fusion_scores"].append(fusion_score)
+        queries[qid]["spladev3_scores"].append(float(rec.get("spladev3_score", 0.0)))
 
         if model is not None and device is not None:
             gardian_features[qid]["candidates"].append(
@@ -200,12 +352,29 @@ def evaluate_all_from_rank_data(
                 )
                 gardian_features[qid]["kg_coverage"] = rec["kg_coverage"]
 
+    for qid, qdata in queries.items():
+        qdata["rrf_scores"] = _rrf_scores_for_query(
+            qdata["sparse_scores"],
+            qdata["dense_scores"],
+        )
+
     def metrics_from_score_key(
         queries_data: Dict[str, Dict[str, Any]],
         score_key: str,
         collect: bool,
     ) -> Tuple[Dict[str, float], Optional[Dict[str, List[float]]], int]:
-        keys = ["ndcg@5", "ndcg@10", "ndcg@20", "recall@5", "recall@20", "mrr"]
+        keys = [
+            "ndcg@5",
+            "ndcg@10",
+            "ndcg@20",
+            "ndcg@50",
+            "ndcg@100",
+            "recall@5",
+            "recall@20",
+            "recall@50",
+            "recall@100",
+            "mrr",
+        ]
         lists: Dict[str, List[float]] = {k: [] for k in keys}
         no_positive_queries = 0
         for qid, qdata in queries_data.items():
@@ -218,8 +387,12 @@ def evaluate_all_from_rank_data(
             lists["ndcg@5"].append(compute_ndcg(ranked_ids, relevant_ids, 5))
             lists["ndcg@10"].append(compute_ndcg(ranked_ids, relevant_ids, 10))
             lists["ndcg@20"].append(compute_ndcg(ranked_ids, relevant_ids, 20))
+            lists["ndcg@50"].append(compute_ndcg(ranked_ids, relevant_ids, 50))
+            lists["ndcg@100"].append(compute_ndcg(ranked_ids, relevant_ids, 100))
             lists["recall@5"].append(compute_recall(ranked_ids, relevant_ids, 5))
             lists["recall@20"].append(compute_recall(ranked_ids, relevant_ids, 20))
+            lists["recall@50"].append(compute_recall(ranked_ids, relevant_ids, 50))
+            lists["recall@100"].append(compute_recall(ranked_ids, relevant_ids, 100))
             lists["mrr"].append(compute_mrr(ranked_ids, relevant_ids))
         means = _aggregate_lists(lists)
         means["mrr@10"] = means["mrr"]
@@ -231,29 +404,52 @@ def evaluate_all_from_rank_data(
     results["_meta"] = {
         "rank_data_path": rank_data_path,
         "query_count": query_count,
+        "retriever_type": rank_retriever_type or None,
+        "canonical_baseline_keys": bool(canonical_baseline_keys),
+        "baseline_keys": {
+            "sparse": sparse_key,
+            "dense": dense_key,
+            "fusion": fusion_key,
+        },
     }
 
-    for name, key in [
-        ("bm25", "bm25_scores"),
-        ("dense", "dense_scores"),
-        ("hybrid", "hybrid_scores"),
-    ]:
+    qdict = dict(queries)
+
+    def _emit(name: str, internal_key: str) -> None:
         logger.info(f"  Evaluating {name}...")
-        m, pq, no_pos = metrics_from_score_key(queries, key, collect_per_query)
+        m, pq, no_pos = metrics_from_score_key(queries, internal_key, collect_per_query)
         if collect_per_query and pq is not None:
             m["_per_query"] = pq
         results[name] = m
         results["_meta"][f"{name}_no_positive_queries"] = no_pos
 
-    qdict = dict(queries)
-    for name, key in [("doc2query", "doc2query_scores")]:
-        if _score_key_has_nonzero_signal(qdict, key):
-            logger.info(f"  Evaluating {name}...")
-            m, pq, no_pos = metrics_from_score_key(queries, key, collect_per_query)
-            if collect_per_query and pq is not None:
-                m["_per_query"] = pq
-            results[name] = m
-            results["_meta"][f"{name}_no_positive_queries"] = no_pos
+    # Sparse / dense / sum baselines (keys depend on retriever_type when canonical_baseline_keys).
+    seen_baseline_labels: set[str] = set()
+    for label, internal_key in (
+        (sparse_key, "sparse_scores"),
+        (dense_key, "dense_scores"),
+        (fusion_key, "fusion_scores"),
+    ):
+        if label in seen_baseline_labels:
+            continue
+        if "(none)" in label and not _score_key_has_nonzero_signal(qdict, internal_key):
+            continue
+        seen_baseline_labels.add(label)
+        _emit(label, internal_key)
+
+    _emit("rrf", "rrf_scores")
+    skip_standalone_spladev3 = bool(
+        canonical_baseline_keys and sparse_key == "sparse(spladev3)"
+    )
+    if not skip_standalone_spladev3:
+        for name, key in [("spladev3", "spladev3_scores")]:
+            if _score_key_has_nonzero_signal(qdict, key):
+                logger.info(f"  Evaluating {name}...")
+                m, pq, no_pos = metrics_from_score_key(queries, key, collect_per_query)
+                if collect_per_query and pq is not None:
+                    m["_per_query"] = pq
+                results[name] = m
+                results["_meta"][f"{name}_no_positive_queries"] = no_pos
 
     if model is not None and device is not None and gardian_features:
         logger.info(
@@ -293,7 +489,18 @@ def evaluate_all_from_rank_data(
                 gardian_results[qid]["candidates"] = qdata["candidates"]
                 gardian_results[qid]["scores"] = scores.cpu().numpy().flatten()
 
-        keys = ["ndcg@5", "ndcg@10", "ndcg@20", "recall@5", "recall@20", "mrr"]
+        keys = [
+            "ndcg@5",
+            "ndcg@10",
+            "ndcg@20",
+            "ndcg@50",
+            "ndcg@100",
+            "recall@5",
+            "recall@20",
+            "recall@50",
+            "recall@100",
+            "mrr",
+        ]
         lists: Dict[str, List[float]] = {k: [] for k in keys}
         no_positive_queries = 0
         for qid, qdata in gardian_results.items():
@@ -307,8 +514,12 @@ def evaluate_all_from_rank_data(
             lists["ndcg@5"].append(compute_ndcg(ranked_ids, relevant_ids, 5))
             lists["ndcg@10"].append(compute_ndcg(ranked_ids, relevant_ids, 10))
             lists["ndcg@20"].append(compute_ndcg(ranked_ids, relevant_ids, 20))
+            lists["ndcg@50"].append(compute_ndcg(ranked_ids, relevant_ids, 50))
+            lists["ndcg@100"].append(compute_ndcg(ranked_ids, relevant_ids, 100))
             lists["recall@5"].append(compute_recall(ranked_ids, relevant_ids, 5))
             lists["recall@20"].append(compute_recall(ranked_ids, relevant_ids, 20))
+            lists["recall@50"].append(compute_recall(ranked_ids, relevant_ids, 50))
+            lists["recall@100"].append(compute_recall(ranked_ids, relevant_ids, 100))
             lists["mrr"].append(compute_mrr(ranked_ids, relevant_ids))
 
         results["gardian"] = _aggregate_lists(lists)
