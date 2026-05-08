@@ -27,6 +27,7 @@ pip-wheel-metadata/
 .cache/
 .hf_cache/
 .ragatouille/
+.hf-cache/
 
 # ----------------------
 # Project outputs
