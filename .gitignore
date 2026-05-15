@@ -42,7 +42,7 @@ gardian_server.log
 data/
 hf_cache/
 umls_data/
-
+umls_data.zip
 # Large data files
 *.jsonl
 *.pt
