@@ -94,6 +94,7 @@ def evaluate_rank_data(
     query_encoder_name: Optional[str] = None,
     query_encoder_device: str = "cpu",
     query_emb_cache_path: Optional[str] = None,
+    batch_size: int = 8192,
 ) -> float:
     """Compute mean nDCG@k over queries from rank JSONL (early stopping)."""
 
@@ -106,6 +107,14 @@ def evaluate_rank_data(
 
     if query_emb_cache_path:
         p = Path(query_emb_cache_path)
+        if not p.exists() and p.name.endswith("_train_all.pkl"):
+            all_cache = p.with_name(p.name.replace("_train_all.pkl", "_all.pkl"))
+            if all_cache.exists():
+                p = all_cache
+        elif p.exists() and p.name.endswith("_train_all.pkl"):
+            all_cache = p.with_name(p.name.replace("_train_all.pkl", "_all.pkl"))
+            if all_cache.exists():
+                p = all_cache
         if p.exists():
             try:
                 with p.open("rb") as f:
@@ -156,6 +165,44 @@ def evaluate_rank_data(
         query_emb_cache[qid] = emb
         return emb
 
+    eval_batch_size = max(1, int(batch_size))
+    batch_sparse: List[List[float]] = []
+    batch_dense: List[List[float]] = []
+    batch_kg: List[List[float]] = []
+    batch_qemb: List[List[float]] = []
+    batch_qtype: List[List[float]] = []
+    batch_cov: List[float] = []
+    batch_meta: List[tuple] = []
+
+    def _flush_batch() -> None:
+        if not batch_meta:
+            return
+        sparse_t = torch.tensor(batch_sparse, dtype=torch.float32, device=device)
+        dense_t = torch.tensor(batch_dense, dtype=torch.float32, device=device)
+        kg_t = torch.tensor(batch_kg, dtype=torch.float32, device=device)
+        qemb_t = torch.tensor(batch_qemb, dtype=torch.float32, device=device)
+        qtype_t = torch.tensor(batch_qtype, dtype=torch.float32, device=device)
+        cov_t = torch.tensor(batch_cov, dtype=torch.float32, device=device)
+        out = model(
+            sparse_feats=sparse_t,
+            dense_feats=dense_t,
+            kg_feats=kg_t,
+            query_emb=qemb_t,
+            qtype_onehot=qtype_t,
+            kg_coverage=cov_t,
+            ablation=ablation,
+        )
+        scores = out[0] if isinstance(out, (tuple, list)) else out
+        for score, (qid, pid, label) in zip(scores.detach().float().cpu().tolist(), batch_meta):
+            query_scores[qid].append((float(score), pid, label))
+        batch_sparse.clear()
+        batch_dense.clear()
+        batch_kg.clear()
+        batch_qemb.clear()
+        batch_qtype.clear()
+        batch_cov.clear()
+        batch_meta.clear()
+
     with torch.no_grad(), open(dev_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             if not line.strip():
@@ -166,26 +213,17 @@ def evaluate_rank_data(
             except json.JSONDecodeError:
                 continue
 
-            t = lambda x: torch.tensor([x], dtype=torch.float32, device=device)
             q_emb = _resolve_query_emb(rec)
-
-            s, _ = model(
-                sparse_feats=t(rec["sparse_feats"]),
-                dense_feats=t(rec["dense_feats"]),
-                kg_feats=t(rec["kg_feats"]),
-                query_emb=t(q_emb),
-                qtype_onehot=t(rec["qtype_onehot"]),
-                kg_coverage=torch.tensor(
-                    [rec["kg_coverage"]],
-                    dtype=torch.float32,
-                    device=device
-                ),
-                ablation=ablation,
-            )
-
-            query_scores[rec["qid"]].append(
-                (float(s[0]), rec["pid"], rec["label"])
-            )
+            batch_sparse.append(rec["sparse_feats"])
+            batch_dense.append(rec["dense_feats"])
+            batch_kg.append(rec["kg_feats"])
+            batch_qemb.append(q_emb)
+            batch_qtype.append(rec["qtype_onehot"])
+            batch_cov.append(float(rec["kg_coverage"]))
+            batch_meta.append((rec["qid"], rec["pid"], rec["label"]))
+            if len(batch_meta) >= eval_batch_size:
+                _flush_batch()
+        _flush_batch()
 
     ndcgs = []
 

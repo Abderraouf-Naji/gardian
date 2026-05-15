@@ -5,22 +5,26 @@ from pathlib import Path
 # Canonical retriever family names used for files/checkpoints.
 RETRIEVER_CANONICAL = {
     "hybrid_bm25_faiss",
-    "hybrid_spladev3_colbert",
+    "hybrid_bm25_medcpt",
+    "hybrid_spladepp_faiss",
+    "hybrid_spladepp_medcpt",
     "bm25",
     "faiss",
-    "spladev3",
-    "colbert",
+    "spladepp",
+    "medcpt",
 }
 
 # Backward-compatible aliases accepted by CLI and path resolver.
 RETRIEVER_ALIASES = {
     "hybrid": "hybrid_bm25_faiss",
-    "hybrid_neural": "hybrid_spladev3_colbert",
+    "hybrid_neural": "hybrid_spladepp_medcpt",
 }
 
 HYBRID_FAMILIES = {
     "hybrid_bm25_faiss",
-    "hybrid_spladev3_colbert",
+    "hybrid_bm25_medcpt",
+    "hybrid_spladepp_faiss",
+    "hybrid_spladepp_medcpt",
 }
 
 

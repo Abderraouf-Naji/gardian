@@ -255,40 +255,53 @@ def build_indices_for_corpus(
     indices_dir: pathlib.Path,
     encoder_name: str,
     batch_size: int,
+    which: str = "both",
 ) -> None:
+    """Build BM25 and/or FAISS indices for one corpus.
+
+    ``which`` selects what to build:
+      * ``"bm25"`` — only BM25 (pure CPU, safe to run in parallel with GPU jobs)
+      * ``"faiss"`` — only FAISS dense index (needs GPU encoder)
+      * ``"both"`` — both, sequentially (default)
     """
-    Build BM25 and FAISS indices for one corpus.
-    """
+    which = which.lower()
+    if which not in {"bm25", "faiss", "both"}:
+        raise ValueError(f"which must be one of bm25/faiss/both, got {which!r}")
+
     bm25_dir, faiss_index_path, faiss_meta_path = get_index_paths(indices_dir, corpus_name)
 
     logger.info("=" * 72)
-    logger.info(f"Building indices for corpus: {corpus_name}")
+    logger.info(f"Building indices for corpus: {corpus_name} (which={which})")
     logger.info("=" * 72)
     logger.info(f"Corpus JSONL : {corpus_path}")
-    logger.info(f"BM25 dir     : {bm25_dir}")
-    logger.info(f"FAISS path   : {faiss_index_path}")
-    logger.info(f"Meta path    : {faiss_meta_path}")
-    logger.info(f"Encoder      : {encoder_name}")
-    logger.info(f"Batch size   : {batch_size}")
+    if which in {"bm25", "both"}:
+        logger.info(f"BM25 dir     : {bm25_dir}")
+    if which in {"faiss", "both"}:
+        logger.info(f"FAISS path   : {faiss_index_path}")
+        logger.info(f"Meta path    : {faiss_meta_path}")
+        logger.info(f"Encoder      : {encoder_name}")
+        logger.info(f"Batch size   : {batch_size}")
 
-    logger.info("-" * 72)
-    logger.info("Building BM25 index")
-    build_bm25_index(
-        corpus_jsonl=str(corpus_path),
-        index_dir=str(bm25_dir),
-    )
+    if which in {"bm25", "both"}:
+        logger.info("-" * 72)
+        logger.info("Building BM25 index")
+        build_bm25_index(
+            corpus_jsonl=str(corpus_path),
+            index_dir=str(bm25_dir),
+        )
 
-    logger.info("-" * 72)
-    logger.info("Building FAISS dense index")
-    build_faiss_index(
-        corpus_jsonl=str(corpus_path),
-        faiss_path=str(faiss_index_path),
-        meta_path=str(faiss_meta_path),
-        encoder_name=encoder_name,
-        batch_size=batch_size,
-    )
+    if which in {"faiss", "both"}:
+        logger.info("-" * 72)
+        logger.info("Building FAISS dense index")
+        build_faiss_index(
+            corpus_jsonl=str(corpus_path),
+            faiss_path=str(faiss_index_path),
+            meta_path=str(faiss_meta_path),
+            encoder_name=encoder_name,
+            batch_size=batch_size,
+        )
 
-    logger.success(f"Finished building indices for corpus: {corpus_name}")
+    logger.success(f"Finished building indices for corpus: {corpus_name} (which={which})")
 
 
 def build_unified_faiss_only(cfg) -> None:
@@ -329,11 +342,36 @@ def build_unified_faiss_only(cfg) -> None:
 # -----------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build BM25 + FAISS indices (per corpus and unified).")
+    parser = argparse.ArgumentParser(
+        description="Build BM25 + FAISS indices (per corpus and unified)."
+    )
     parser.add_argument(
         "--unified-faiss-only",
         action="store_true",
-        help="Only build FAISS for data/indices/unified/corpus_unified.jsonl (matches hybrid in 08_ask_gardian).",
+        help=(
+            "Only build FAISS for data/indices/unified/corpus_unified.jsonl "
+            "(matches hybrid in 08_ask_gardian)."
+        ),
+    )
+    parser.add_argument(
+        "--only",
+        type=str,
+        choices=["bm25", "faiss", "both"],
+        default="both",
+        help=(
+            "Which index family to build. ``bm25`` is pure CPU and safe to run "
+            "concurrently with GPU jobs (SPLADE, MedCPT, FAISS). ``faiss`` is GPU-"
+            "bound. Default ``both`` runs them sequentially per corpus."
+        ),
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="all",
+        help=(
+            "Restrict to a single corpus: one of "
+            f"{', '.join(CORPORA.keys())}, ``{UNIFIED_NAME}``, or ``all`` (default)."
+        ),
     )
     args = parser.parse_args()
 
@@ -370,6 +408,25 @@ def main() -> None:
     if not available_corpora:
         raise FileNotFoundError("No corpus files found. Run Script 00 first.")
 
+    # Filter by --dataset
+    dataset_arg = args.dataset.lower()
+    valid_per_corpus = set(CORPORA.keys())
+    if dataset_arg != "all":
+        if dataset_arg == UNIFIED_NAME:
+            available_corpora = {}   # only the unified pass runs below
+        elif dataset_arg in valid_per_corpus:
+            if dataset_arg in available_corpora:
+                available_corpora = {dataset_arg: available_corpora[dataset_arg]}
+            else:
+                raise FileNotFoundError(
+                    f"--dataset {dataset_arg!r} requested but corpus file not found"
+                )
+        else:
+            raise ValueError(
+                f"--dataset {dataset_arg!r} not recognised. "
+                f"Choose one of {sorted(valid_per_corpus | {UNIFIED_NAME, 'all'})}"
+            )
+
     logger.info("=" * 72)
     logger.info("Validating input corpora")
     logger.info("=" * 72)
@@ -383,51 +440,62 @@ def main() -> None:
     logger.info("=" * 72)
     for corpus_name, count in counts.items():
         logger.info(f"{corpus_name:<22} {count:>12,} passages")
+    logger.info(f"Build mode: which={args.only}  dataset={args.dataset}")
 
     # Build per-corpus indices
-    logger.info("=" * 72)
-    logger.info("Building per-corpus indices")
-    logger.info("=" * 72)
+    if available_corpora:
+        logger.info("=" * 72)
+        logger.info("Building per-corpus indices")
+        logger.info("=" * 72)
 
-    for corpus_name, corpus_path in available_corpora.items():
-        ensure_output_dirs(indices_dir, corpus_name)
-        warn_existing_outputs(indices_dir, corpus_name)
+        for corpus_name, corpus_path in available_corpora.items():
+            ensure_output_dirs(indices_dir, corpus_name)
+            warn_existing_outputs(indices_dir, corpus_name)
+            build_indices_for_corpus(
+                corpus_name=corpus_name,
+                corpus_path=corpus_path,
+                indices_dir=indices_dir,
+                encoder_name=encoder_name,
+                batch_size=batch_size,
+                which=args.only,
+            )
+
+    # Unified corpus — built when dataset is 'all' or 'unified'
+    if dataset_arg in {"all", UNIFIED_NAME}:
+        logger.info("=" * 72)
+        logger.info("Building unified corpus and unified indices")
+        logger.info("=" * 72)
+
+        ensure_output_dirs(indices_dir, UNIFIED_NAME)
+        warn_existing_outputs(indices_dir, UNIFIED_NAME)
+
+        if UNIFIED_CORPUS_PATH.exists():
+            logger.info(f"Reusing existing unified corpus: {UNIFIED_CORPUS_PATH}")
+        else:
+            # Need full corpora list to merge — re-read it without the dataset filter.
+            full_corpora = {
+                name: path for name, path in corpora_paths.items() if path.exists()
+            }
+            build_unified_corpus(
+                corpora=full_corpora,
+                output_path=UNIFIED_CORPUS_PATH,
+            )
+
+        validate_corpus(UNIFIED_CORPUS_PATH)
+
         build_indices_for_corpus(
-            corpus_name=corpus_name,
-            corpus_path=corpus_path,
+            corpus_name=UNIFIED_NAME,
+            corpus_path=UNIFIED_CORPUS_PATH,
             indices_dir=indices_dir,
             encoder_name=encoder_name,
             batch_size=batch_size,
+            which=args.only,
         )
-
-    # Unified corpus
-    logger.info("=" * 72)
-    logger.info("Building unified corpus and unified indices")
-    logger.info("=" * 72)
-
-    ensure_output_dirs(indices_dir, UNIFIED_NAME)
-    warn_existing_outputs(indices_dir, UNIFIED_NAME)
-
-    if UNIFIED_CORPUS_PATH.exists():
-        logger.info(f"Reusing existing unified corpus: {UNIFIED_CORPUS_PATH}")
-    else:
-        build_unified_corpus(
-            corpora=available_corpora,
-            output_path=UNIFIED_CORPUS_PATH,
-        )
-
-    validate_corpus(UNIFIED_CORPUS_PATH)
-
-    build_indices_for_corpus(
-        corpus_name=UNIFIED_NAME,
-        corpus_path=UNIFIED_CORPUS_PATH,
-        indices_dir=indices_dir,
-        encoder_name=encoder_name,
-        batch_size=batch_size,
-    )
 
     logger.success("=" * 72)
-    logger.success("All per-corpus and unified indices built successfully.")
+    logger.success(
+        f"BM25/FAISS indices built (which={args.only}, dataset={args.dataset})."
+    )
     logger.success("=" * 72)
 
 

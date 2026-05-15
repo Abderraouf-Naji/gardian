@@ -59,6 +59,7 @@ Usage
 """
 
 import os, pickle, pathlib
+from collections import Counter
 import networkx as nx
 from loguru import logger
 from tqdm import tqdm
@@ -82,7 +83,7 @@ COL_RELA    = 7
 COL_SUPPRESS_REL = 14
 
 # ── Filters ──────────────────────────────────────────────────────────────────
-# Source vocabularies most relevant to medical QA
+# Source vocabularies most relevant to medical QA.
 SOURCES_KEEP = {
     "SNOMEDCT_US",   # SNOMED Clinical Terms
     "ICD10CM",       # ICD-10 Clinical Modification
@@ -96,32 +97,92 @@ SOURCES_KEEP = {
     "MEDLINEPLUS",   # MedlinePlus
 }
 
-# Relation types to keep from MRREL.
-# Keep clinically interpretable hierarchy/typed links; drop broad "RO" by default
-# because it can flood the graph with weakly-typed edges.
-RELATIONS_KEEP = {
-    "RB",    # Broader
-    "RN",    # Narrower
-    "PAR",   # Parent
-    "CHD",   # Child
-}
+# REL types to keep from MRREL.
+#
+# PRIOR BUG (now fixed): keeping ONLY {RB, RN, PAR, CHD} silently dropped every
+# clinically meaningful UMLS edge, because clinical RELAs such as ``may_treat``,
+# ``has_mechanism_of_action`` and ``contraindicated_with_disease`` all live on
+# ``REL='RO'`` (Related Other) rows. Filtering them out left only SNOMED isa/
+# inverse_isa taxonomy, which is why the KG branch was always negligible in
+# rank-data and downstream evaluation.
+#
+# We now do NOT filter on REL at all (empty set = inert filter, see the loop
+# below). The clinical-quality gate is enforced entirely on the RELA allow-list
+# below, which is the right granularity (RELA names the semantic edge type).
+RELATIONS_KEEP: set[str] = set()
 
-# Relation attributes (RELA) of high medical value.
-# IMPORTANT: do NOT keep empty RELA by default in clinical mode; it introduces
-# many generic edges that dilute KG signal for reranking.
+# RELA allow-list aligned with the QA types declared in configs/base.yaml:
+#   ["diagnosis", "treatment", "mechanism", "contraindication",
+#    "factoid", "yesno", "other"]
+#
+# We keep three families of edges:
+#   (a) taxonomy backbone — ``isa`` / ``inverse_isa`` plus equivalent broader/
+#       narrower terms. These give KG distances a "shortest hop through
+#       SNOMED" baseline and matter for factoid / yesno / other.
+#   (b) anatomy + symptom links — finding-site, manifestation, morphology.
+#       Needed for diagnosis-type questions ("which disease causes X?").
+#   (c) drug + therapy + mechanism + contraindication links. Needed for
+#       treatment / mechanism / contraindication questions.
+#
+# Generic / weak RELAs ("classifies", "mapped_to", "associated_with", etc.) are
+# intentionally excluded — they flood the graph with low-signal edges that
+# dilute path-distance features.
 RELA_KEEP = {
+    # (a) Taxonomy / equivalence
     "isa", "inverse_isa",
+    "has_member", "member_of",
+    "has_part", "part_of",
+    "has_class", "class_of",
+    "has_form", "form_of",
+    "has_tradename", "tradename_of",
+
+    # (b) Diagnosis — symptoms / findings / morphology / anatomy
     "has_finding_site", "finding_site_of",
-    "has_causative_agent", "causative_agent_of",
-    "has_associated_morphology",
+    "has_manifestation", "manifestation_of",
+    "has_associated_morphology", "associated_morphology_of",
+    "has_definitional_manifestation", "definitional_manifestation_of",
+    "has_clinical_course", "clinical_course_of",
+    "has_pathological_process", "pathological_process_of",
+    "disease_has_finding", "disease_has_associated_disease",
+    "disease_has_normal_tissue_origin",
+    "disease_has_abnormal_cell",
+    "disease_may_have_finding",
+    "may_be_diagnosed_by", "diagnoses",
+
+    # (c) Treatment / drug-disease therapeutic links
     "treats", "treated_by",
+    "may_treat", "may_be_treated_by",
+    "has_therapeutic_class", "therapeutic_class_of",
+    "has_dose_form", "dose_form_of",
     "has_ingredient", "ingredient_of",
-    "has_contraindication",
-    "contraindicated_with_disease",
-    "contraindicated_with",
-    "has_mechanism_of_action",
-    "manifestation_of", "has_manifestation",
-    "associated_with",
+    "active_ingredient_of", "has_active_ingredient",
+    "precise_ingredient_of", "has_precise_ingredient",
+    "has_drug_class_membership",
+    "may_prevent", "may_be_prevented_by",
+
+    # (d) Mechanism of action / targets / pharmacology
+    "has_mechanism_of_action", "mechanism_of_action_of",
+    "chemical_or_drug_has_mechanism_of_action",
+    "has_physiologic_effect", "physiologic_effect_of",
+    "has_target", "target_of",
+    "has_molecular_action", "molecular_action_of",
+    "has_pharmacokinetics", "pharmacokinetics_of",
+    "regulates", "regulated_by",
+    "inhibits", "inhibited_by",
+    "induces", "induced_by",
+
+    # (e) Contraindications + adverse interactions
+    "has_contraindication", "contraindication_of",
+    "contraindicated_with_disease", "contraindicated_drug",
+    "has_contraindicated_drug",
+    "has_contraindicated_class", "contraindicating_class_of",
+    "has_adverse_effect", "adverse_effect_of",
+    "interacts_with",
+
+    # (f) Causal / pathophysiology (used by mechanism + diagnosis questions)
+    "cause_of", "has_cause",
+    "has_causative_agent", "causative_agent_of",
+    "due_to", "underlies",
 }
 
 
@@ -129,12 +190,26 @@ RELA_KEEP = {
 # Main builder
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _atom_priority(ts: str, ispref: str) -> int:
+    """Lower is better. 0 = preferred-of-preferred-source atom.
+
+    Used to deduplicate surface-form -> CUI when multiple CUIs share a string.
+    """
+    if ts == "P" and ispref == "Y":
+        return 0   # gold: preferred atom of preferred source
+    if ts == "P":
+        return 1   # preferred atom (any source rank)
+    if ispref == "Y":
+        return 2   # preferred string-of-source
+    return 3       # ordinary synonym
+
+
 def build_kg_from_rrf(
     mrconso_path: str,
     out_pkl: str,
     out_lex: str,
     mrrel_path: str = None,
-    max_concepts: int = 300_000,
+    max_concepts: int | None = None,
     sources_keep=None,
     relations_keep=None,
     rela_keep=None,
@@ -149,14 +224,15 @@ def build_kg_from_rrf(
     out_pkl      : output path for pickled nx.DiGraph
     out_lex      : output path for pickled lexical dict
     mrrel_path   : path to MRREL.RRF (optional; adds relation edges)
-    max_concepts : cap on number of CUIs to keep (set None for full UMLS)
+    max_concepts : cap on number of CUIs to keep (default ``None`` → unlimited)
     """
     mrconso_path = pathlib.Path(mrconso_path)
     assert mrconso_path.exists(), f"MRCONSO.RRF not found: {mrconso_path}"
 
-    cui_label: dict[str, str] = {}   # CUI → preferred English label
-    cui_alts:  dict[str, list] = {}  # CUI → all English surface forms
-    lexical:   dict[str, str]  = {}  # surface_lower → CUI
+    cui_label: dict[str, str] = {}            # CUI → preferred English label
+    cui_alts:  dict[str, list] = {}           # CUI → all English surface forms
+    lexical:   dict[str, str]  = {}           # surface_lower → CUI
+    lex_prio:  dict[str, int]  = {}           # surface_lower → priority of stored CUI
 
     allowed_sources = SOURCES_KEEP if sources_keep is None else set(sources_keep)
     allowed_relations = RELATIONS_KEEP if relations_keep is None else set(relations_keep)
@@ -167,6 +243,10 @@ def build_kg_from_rrf(
         logger.info(f"  Filtering to sources: {sorted(allowed_sources)}")
     else:
         logger.info("  Source filter disabled: keeping all vocabularies")
+    if max_concepts:
+        logger.info(f"  max_concepts cap: {max_concepts:,}")
+    else:
+        logger.info("  max_concepts cap: <unlimited>")
 
     with open(mrconso_path, encoding="utf-8", errors="replace") as f:
         for line in tqdm(f, desc="MRCONSO", unit=" lines"):
@@ -194,10 +274,17 @@ def build_kg_from_rrf(
             if not term:
                 continue
 
-            # Build lexical index: every surface form → CUI
+            # Priority-aware lexical index. When several CUIs share the same
+            # surface form (e.g. "anemia") we keep the CUI from the highest-
+            # quality atom (preferred-of-preferred-source first). This avoids
+            # the previous "first row wins" bias which depended on MRCONSO file
+            # ordering rather than concept salience.
             surface = term.lower()
-            if surface not in lexical:
+            prio = _atom_priority(ts, pref)
+            cur_prio = lex_prio.get(surface)
+            if cur_prio is None or prio < cur_prio:
                 lexical[surface] = cui
+                lex_prio[surface] = prio
 
             # Track preferred label (TS=P and ISPREF=Y is the "best" label)
             if cui not in cui_label:
@@ -221,6 +308,8 @@ def build_kg_from_rrf(
         G.add_node(cui, label=label, synonyms=cui_alts.get(cui, []))
 
     edges_added = 0
+    rela_kept_counts: Counter = Counter()
+    rel_kept_counts: Counter = Counter()
 
     if mrrel_path:
         mrrel_path = pathlib.Path(mrrel_path)
@@ -228,6 +317,11 @@ def build_kg_from_rrf(
             logger.warning(f"MRREL.RRF not found at {mrrel_path} — graph will have no edges.")
         else:
             logger.info(f"Parsing MRREL.RRF from {mrrel_path} …")
+            if allowed_relations:
+                logger.info(f"  REL filter:  {sorted(allowed_relations)}")
+            else:
+                logger.info("  REL filter:  <disabled> (gate is RELA-only)")
+            logger.info(f"  RELA filter: {len(allowed_rela)} allowed types")
             with open(mrrel_path, encoding="utf-8", errors="replace") as f:
                 for line in tqdm(f, desc="MRREL", unit=" lines"):
                     parts = line.rstrip("\n").split("|")
@@ -253,8 +347,18 @@ def build_kg_from_rrf(
 
                     G.add_edge(cui1, cui2, rel=rel, rela=rela)
                     edges_added += 1
+                    rela_kept_counts[rela] += 1
+                    rel_kept_counts[rel] += 1
 
             logger.info(f"  → {edges_added:,} edges added")
+            # Print a sanity-check histogram so we can immediately see whether
+            # the clinical RELAs actually survived the filter.
+            top_rela = rela_kept_counts.most_common(20)
+            if top_rela:
+                logger.info("  Top RELA (kept) | " + " ".join(f"{r}={n:,}" for r, n in top_rela))
+            top_rel = rel_kept_counts.most_common(8)
+            if top_rel:
+                logger.info("  Top REL  (kept) | " + " ".join(f"{r}={n:,}" for r, n in top_rel))
     else:
         logger.warning("No MRREL.RRF provided — KG will have nodes but no edges. "
                        "Graph features will use entity overlap only, not path distances.")
@@ -263,8 +367,10 @@ def build_kg_from_rrf(
 
     # ── Save ─────────────────────────────────────────────────────────────────
     pathlib.Path(out_pkl).parent.mkdir(parents=True, exist_ok=True)
-    pickle.dump(G,       open(out_pkl, "wb"), protocol=4)
-    pickle.dump(lexical, open(out_lex, "wb"), protocol=4)
+    with open(out_pkl, "wb") as f:
+        pickle.dump(G, f, protocol=4)
+    with open(out_lex, "wb") as f:
+        pickle.dump(lexical, f, protocol=4)
     logger.success(f"KG graph   → {out_pkl}")
     logger.success(f"Lexical idx→ {out_lex}")
     return G, lexical
@@ -278,7 +384,7 @@ def build_kg_from_umls_dir(
     umls_meta_dir: str,
     out_pkl: str,
     out_lex: str,
-    max_concepts: int = 300_000,
+    max_concepts: int | None = None,
     sources_keep=None,
     relations_keep=None,
     rela_keep=None,
@@ -314,7 +420,7 @@ def build_kg_from_mrconso_zip(
     zip_path: str,
     out_pkl: str,
     out_lex: str,
-    max_concepts: int = 300_000,
+    max_concepts: int | None = None,
     sources_keep=None,
 ):
     """
@@ -397,15 +503,19 @@ def build_synthetic_kg(out_pkl: str, out_lex: str):
 
     lexical = {v.lower(): k for k, v in labels.items()}
     pathlib.Path(out_pkl).parent.mkdir(parents=True, exist_ok=True)
-    pickle.dump(G,       open(out_pkl, "wb"), protocol=4)
-    pickle.dump(lexical, open(out_lex, "wb"), protocol=4)
+    with open(out_pkl, "wb") as f:
+        pickle.dump(G, f, protocol=4)
+    with open(out_lex, "wb") as f:
+        pickle.dump(lexical, f, protocol=4)
     logger.success("Synthetic KG written.")
     return G, lexical
 
 
 def load_kg(kg_pkl: str, lex_pkl: str):
-    G   = pickle.load(open(kg_pkl, "rb"))
-    lex = pickle.load(open(lex_pkl, "rb"))
+    with open(kg_pkl, "rb") as f:
+        G = pickle.load(f)
+    with open(lex_pkl, "rb") as f:
+        lex = pickle.load(f)
     logger.info(f"KG loaded: {G.number_of_nodes():,} nodes, {G.number_of_edges():,} edges, "
                 f"{len(lex):,} surface forms")
     return G, lex

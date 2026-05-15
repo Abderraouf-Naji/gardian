@@ -22,38 +22,31 @@ from src.common.question_types import assert_cfg_question_types
 from src.common.rank_data_paths import normalize_retriever_name, resolve_rank_data_file
 from src.evaluation.rank_jsonl_eval import evaluate_all_from_rank_data
 from src.evaluation.schemas import validate_evaluation_results
-from src.model.gardian import GARDIAN
+from src.model.gardian import GARDIAN, build_gardian_from_model_cfg
 
 torch.set_float32_matmul_precision("high")
 
 HYBRID_RETRIEVER_COMBINATIONS = {
     "hybrid_bm25_faiss": "BM25 + FAISS",
-    "hybrid_doc2query_biobert": "Doc2Query + BioBERT",
-    "hybrid_bm25_biobert": "BM25 + BioBERT",
-    "hybrid_doc2query_faiss": "Doc2Query + FAISS",
+    "hybrid_bm25_medcpt": "BM25 + MedCPT",
+    "hybrid_spladepp_faiss": "SPLADE++ + FAISS",
+    "hybrid_spladepp_medcpt": "SPLADE++ + MedCPT",
 }
 
-ALL_EVAL_RETRIEVERS = [
-    "hybrid_bm25_faiss",
-    "hybrid_doc2query_biobert",
-    "hybrid_bm25_biobert",
-    "hybrid_doc2query_faiss",
-    "doc2query",
-]
+ALL_EVAL_RETRIEVERS = list(HYBRID_RETRIEVER_COMBINATIONS.keys())
 
 SPARSE_DENSE_COMPONENTS = {
     "hybrid_bm25_faiss": {"sparse": "bm25", "dense": "faiss"},
-    "hybrid_doc2query_biobert": {"sparse": "doc2query", "dense": "biobert"},
-    "hybrid_bm25_biobert": {"sparse": "bm25", "dense": "biobert"},
-    "hybrid_doc2query_faiss": {"sparse": "doc2query", "dense": "faiss"},
-    "doc2query": {"sparse": "doc2query", "dense": "dense"},
+    "hybrid_bm25_medcpt": {"sparse": "bm25", "dense": "medcpt"},
+    "hybrid_spladepp_faiss": {"sparse": "spladepp", "dense": "faiss"},
+    "hybrid_spladepp_medcpt": {"sparse": "spladepp", "dense": "medcpt"},
 }
 
 
 def _metric_key_for_component(retriever_name: str, role: str) -> str:
     if role == "sparse":
-        if retriever_name == "doc2query":
-            return "doc2query"
+        if retriever_name == "spladepp":
+            return "spladepp"
         return "bm25"
     return "dense"
 
@@ -98,23 +91,14 @@ def _git_revision() -> str:
 
 def build_model(cfg, device: str, retriever: str) -> GARDIAN:
     """Load trained GARDIAN model."""
-    model = GARDIAN(
-        sparse_dim=int(cfg.model.sparse_feat_dim),
-        dense_dim=int(cfg.model.dense_feat_dim),
-        kg_dim=int(cfg.model.kg_feat_dim),
-        branch_hidden=int(cfg.model.branch_hidden),
-        controller_hidden=int(cfg.model.controller_hidden),
-        query_feat_dim=int(cfg.model.query_feat_dim),
-        n_qtypes=len(cfg.model.question_types),
-        dropout=float(cfg.model.dropout),
-    )
-    
     ckpt_path = pathlib.Path(cfg.paths.results_dir) / f"gardian_best_{retriever}.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     
     # Load checkpoint weights on CPU first to avoid CUDA OOM spikes during deserialization.
     ckpt = torch.load(ckpt_path, map_location="cpu")
+    ckpt_model_cfg = ckpt.get("cfg", {}).get("model") if isinstance(ckpt.get("cfg"), dict) else None
+    model = build_gardian_from_model_cfg(ckpt_model_cfg or cfg.model)
     model.load_state_dict(ckpt["model_state"])
     model.to(device)
     model.eval()
@@ -162,6 +146,48 @@ def print_results_table(dataset_name: str, results: Dict[str, Any], retriever: s
     print(f"{'='*100}\n")
 
 
+def _metric(results: Dict[str, Any], system: str, metric_name: str) -> float:
+    block = results.get(system, {})
+    if not isinstance(block, dict):
+        return 0.0
+    return float(block.get(metric_name, 0.0) or 0.0)
+
+
+def _delta_text(value: float, baseline: float) -> str:
+    """Return absolute metric delta plus relative change, both signed."""
+    delta = float(value) - float(baseline)
+    if baseline > 0:
+        rel = delta / float(baseline) * 100.0
+        return f"{delta:+.4f} ({rel:+.1f}%)"
+    return f"{delta:+.4f} (rel n/a)"
+
+
+def _baseline_label(system: str, retriever: str) -> str:
+    parts = SPARSE_DENSE_COMPONENTS.get(retriever, {"sparse": "bm25", "dense": "dense"})
+    if system == "bm25":
+        return f"sparse({parts['sparse']})"
+    if system == "dense":
+        return f"dense({parts['dense']})"
+    if system == "hybrid":
+        return f"hybrid({parts['sparse']}+{parts['dense']})"
+    if system == "rrf":
+        return f"rrf({parts['sparse']}+{parts['dense']})"
+    if system == "spladepp":
+        return "spladepp"
+    return system
+
+
+def _best_non_gardian_baseline(results: Dict[str, Any], retriever: str) -> tuple[str, float]:
+    candidates = []
+    for system in ("bm25", "dense", "hybrid", "rrf", "spladepp"):
+        block = results.get(system)
+        if isinstance(block, dict) and "ndcg@10" in block:
+            candidates.append((_baseline_label(system, retriever), float(block.get("ndcg@10", 0.0) or 0.0)))
+    if not candidates:
+        return ("baseline", 0.0)
+    return max(candidates, key=lambda x: x[1])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate GARDIAN for one or all retriever families")
     parser.add_argument(
@@ -171,11 +197,11 @@ def main() -> None:
         default="all",
         help=(
             "Retriever family to evaluate. "
-            "Hybrid combos: "
+            "Hybrid combos used in the paper: "
             "hybrid_bm25_faiss(BM25+FAISS), "
-            "hybrid_doc2query_biobert(Doc2Query+BioBERT), "
-            "hybrid_bm25_biobert(BM25+BioBERT), "
-            "hybrid_doc2query_faiss(Doc2Query+FAISS). "
+            "hybrid_bm25_medcpt(BM25+MedCPT), "
+            "hybrid_spladepp_faiss(SPLADE++ + FAISS), "
+            "hybrid_spladepp_medcpt(SPLADE++ + MedCPT). "
             "Aliases: hybrid, hybrid_neural."
         ),
     )
@@ -328,20 +354,17 @@ def main() -> None:
         print(f"\n[{retriever.upper()}]")
         for dataset_name, dataset_results in retriever_results.items():
             print(f"  {dataset_name.upper()}:")
-            dense_baseline = dataset_results.get("dense", {}).get("ndcg@10", 0.0)
-            gardian_ndcg10 = dataset_results.get("gardian", {}).get("ndcg@10", 0.0)
-            gardian_mrr = dataset_results.get("gardian", {}).get("mrr", 0.0)
-            if dense_baseline > 0:
-                imp = (gardian_ndcg10 - dense_baseline) / dense_baseline * 100
-                print(
-                    f"    GARDIAN nDCG@10: {gardian_ndcg10:.4f} "
-                    f"(Δ {imp:+.1f}% vs Dense) | MRR: {gardian_mrr:.4f}"
-                )
-            else:
-                print(
-                    f"    GARDIAN nDCG@10: {gardian_ndcg10:.4f} "
-                    f"| MRR: {gardian_mrr:.4f}"
-                )
+            dense_baseline = _metric(dataset_results, "dense", "ndcg@10")
+            gardian_ndcg10 = _metric(dataset_results, "gardian", "ndcg@10")
+            gardian_mrr = _metric(dataset_results, "gardian", "mrr")
+            best_label, best_baseline = _best_non_gardian_baseline(dataset_results, retriever)
+            dense_label = _baseline_label("dense", retriever)
+            print(
+                f"    GARDIAN nDCG@10: {gardian_ndcg10:.4f} | MRR: {gardian_mrr:.4f} | "
+                f"Δ vs {dense_label}: {_delta_text(gardian_ndcg10, dense_baseline)} | "
+                f"Δ vs best baseline ({best_label}={best_baseline:.4f}): "
+                f"{_delta_text(gardian_ndcg10, best_baseline)}"
+            )
 
     # Cross-retriever comparison (GARDIAN only) per dataset
     print("\n" + "=" * 100)

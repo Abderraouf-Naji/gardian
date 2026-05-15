@@ -2,9 +2,10 @@ seed: 42
 
 paths:
   corpus_jsonl: "data/corpus.jsonl"
-  bm25_index: "data/bm25_index"
-  faiss_index: "data/faiss.index"
-  faiss_meta: "data/faiss_meta.jsonl"
+  bm25_index: "data/indices/bm25/unified"
+  bm25_index_pkl: "data/indices/bm25/unified/index.pkl"
+  faiss_index: "data/indices/faiss/unified/faiss.index"
+  faiss_meta: "data/indices/faiss/unified/faiss_meta.jsonl"
   kg_graph: "data/kg/default/umls_kg.pkl"
   kg_lexical_idx: "data/kg/default/umls_kg_lex.pkl"
   rank_data_train: "data/rank_data_train.jsonl"
@@ -23,16 +24,21 @@ corpus:
 retrieval:
   top_k_bm25: 50
   top_k_faiss: 50
-  top_k_spladev3: 50
-  top_k_colbert: 50
+  top_k_spladepp: 50
+  top_k_medcpt: 50
   # Larger pool improves positive-in-pool recall and gives KG branch room to matter.
   candidate_pool_size: 100
-  spladev3_encoder: "naver/splade-v3-distilbert"
-  spladev3_batch_size: 256
-  spladev3_max_length: 256
-  colbert_encoder: "colbert-ir/colbertv2.0"
-  colbert_batch_size: 256
-  colbert_max_length: 256
+  # Real SPLADE (sparse-MLM, log(1+ReLU)+max-pool, vocabulary-space).
+  # SPLADE++ (CoCondenser-EnsembleDistil) is the open learned-sparse retriever
+  # used by GARDIAN.
+  spladepp_encoder: "naver/splade-cocondenser-ensembledistil"
+  spladepp_batch_size: 64
+  spladepp_max_length: 256
+  # MedCPT (NCBI biomedical dense; asymmetric Query/Article encoders).
+  medcpt_article_encoder: "ncbi/MedCPT-Article-Encoder"
+  medcpt_query_encoder: "ncbi/MedCPT-Query-Encoder"
+  medcpt_batch_size: 256
+  medcpt_max_length: 512
 
 encoder:
   model_name: "NeuML/pubmedbert-base-embeddings"
@@ -42,10 +48,10 @@ encoder:
 kg:
   max_path_length: 6
   max_entities_per_text: 16
-  # Global exact mode: compute shortest-path distance features for all candidates.
-  exact_distance_features: true
-  # A* compromise: run exact KG distance only on top-N candidates per query.
-  # Keep 0 for production speed; override by CLI for targeted hybrid runs.
+  # Full-run mode keeps exact KG BFS disabled. Exact distances are useful for
+  # small audits, but too slow for all-query rank generation on the full KG.
+  exact_distance_features: false
+  # Keep 0 for production speed; use exact KG only in targeted audits.
   refine_top_n: 0
 
 model:
@@ -53,29 +59,42 @@ model:
   dense_feat_dim: 4
   kg_feat_dim: 6
   # Slightly larger controller/heads for stronger branch balancing.
-  branch_hidden: 512
-  controller_hidden: 512
+  branch_hidden: 2048
+  controller_hidden: 2048
   query_feat_dim: 768
   # Must match src/common/question_types.ORDERED_QUESTION_TYPES (rank JSONL one-hot axes).
   question_types: ["diagnosis", "treatment", "mechanism", "contraindication", "factoid", "yesno", "other"]
-  dropout: 0.2
+  dropout: 0.15
 
 training:
-  epochs: 20
+  epochs: 30
   batch_size: 256
   lr: 2.0e-5
   weight_decay: 1.0e-4
   margin: 1.0
-  loss: "softmax"
+  # Implemented in src/training/trainer.py as pairwise logistic BCE over
+  # in-query positive/negative pairs.
+  loss: "pairwise_bce"
   early_stopping_patience: 6
   eval_metric: "ndcg@10"
   num_negatives: 32
+  # Bias pair sampling toward top-ranked non-gold candidates. These are the
+  # negatives that most affect nDCG/MRR, so this improves training without
+  # regenerating rank JSONL files.
+  hard_negative_top_n: 100
+  hard_negative_fraction: 0.75
   # Speed knobs for large rank JSONL training
-  max_pairs_per_query: 8
+  max_pairs_per_query: 32
   precompute_query_emb: true
   query_encoder_batch_size: 1024
+  eval_batch_size: 8192
   query_emb_cache_path: "data/query_emb_cache_hybrid_train_all.pkl"
-  num_workers: 8
+  # LRU cap for in-memory qid→query_emb entries during training (ignored if preloaded cache is larger).
+  query_emb_cache_max_entries: 500000
+  # Keep 0: StreamingRankDataset must preserve query-contiguous groups.
+  # Line-level multi-worker sharding splits a query across workers and corrupts
+  # positive/negative pair sampling.
+  num_workers: 0
   cudnn_deterministic: true
 
 evaluation:
@@ -85,13 +104,15 @@ evaluation:
 qa:
   # Causal biomedical LM (Mistral-derived). Falls back to Flan-T5 automatically if you
   # point reader_model at a seq2seq checkpoint.
-  reader_model: BioMistral/BioMistral-7B
+  reader_model: meta-llama/Llama-3.1-8B-Instruct
   # Context window for tokenizer truncation (BioMistral / Mistral often 8k+).
   reader_max_input_length: 8192
   top_k_passages: 10
   # Decoder cap (BioMistral / other causal LMs: 512–2048 is usually enough; raise if outputs truncate).
   max_new_tokens: 2048
-  # Agentic ReAct reader: Thought / Action / Observation with READ_PASSAGE, LIST_SIGNALS, FINAL
+  # Self-RAG–inspired ReAct reader (Thought / Action / Observation + SELF_CRITIQUE).
+  # Much slower (several decoder calls per question). Default off; enable for paper runs:
+  #   qa.reader_react: true   or   python scripts/06_end_to_end_qa.py --reader-react ...
   reader_react: false
   reader_react_max_steps: 6
   reader_react_tokens_per_step: null  # null = heuristic from max_new_tokens / steps

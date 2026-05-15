@@ -35,7 +35,9 @@ RETRIEVER_CHOICES = [
     "hybrid",
     "hybrid_neural",
     "hybrid_bm25_faiss",
-    "hybrid_spladev3_colbert",
+    "hybrid_bm25_medcpt",
+    "hybrid_spladepp_faiss",
+    "hybrid_spladepp_medcpt",
 ]
 
 ABLATION_CHOICES = [
@@ -116,7 +118,11 @@ def parse_args() -> argparse.Namespace:
         "--retrievers",
         type=str,
         default="all",
-        help="Comma list from hybrid_bm25_faiss,hybrid_spladev3_colbert or 'all'.",
+        help=(
+            "Comma list from hybrid_bm25_faiss, hybrid_bm25_medcpt, "
+            "hybrid_spladepp_faiss, hybrid_spladepp_medcpt — or 'all' "
+            "to evaluate every hybrid family."
+        ),
     )
     p.add_argument(
         "--randomization-trials",
@@ -164,7 +170,20 @@ def main() -> None:
         if name not in ABLATION_CHOICES:
             raise SystemExit(f"Unknown ablation {name!r}. Choose from {ABLATION_CHOICES}")
 
-    retrievers = RETRIEVER_CHOICES if args.retrievers == "all" else [x.strip() for x in args.retrievers.split(",") if x.strip()]
+    # ``all`` expands to the four canonical hybrid families used in the
+    # paper; legacy aliases ``hybrid`` / ``hybrid_neural`` are still accepted
+    # when supplied explicitly via --retrievers.
+    canonical_hybrids = [
+        "hybrid_bm25_faiss",
+        "hybrid_bm25_medcpt",
+        "hybrid_spladepp_faiss",
+        "hybrid_spladepp_medcpt",
+    ]
+    retrievers = (
+        canonical_hybrids
+        if args.retrievers == "all"
+        else [x.strip() for x in args.retrievers.split(",") if x.strip()]
+    )
     for r in retrievers:
         if r not in RETRIEVER_CHOICES:
             raise SystemExit(f"Unknown retriever {r!r}. Choose from {RETRIEVER_CHOICES}")

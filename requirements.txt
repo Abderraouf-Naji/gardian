@@ -1,22 +1,37 @@
+# Core deep-learning stack.
+# NOTE: install torch FIRST with the CUDA-12.1 wheel index, otherwise pip will
+# fall back to the CPU build. See the env setup commands in the project docs:
+#   pip install torch torchvision torchaudio \
+#       --index-url https://download.pytorch.org/whl/cu121
 torch>=2.1.0
-transformers>=4.38.0
+transformers>=4.41.0
+accelerate>=0.30.0
 sentence-transformers>=2.7.0
+
+# Datasets / hub.
 datasets>=2.18.0
-pyserini>=0.23.0
+huggingface_hub>=0.24.0
+
+# Retrieval.
+bm25s>=0.2.0
 faiss-cpu>=1.7.4
+
+# Graph & ML utilities.
 networkx>=3.2
 scikit-learn>=1.4.0
 pandas>=2.1.0
 numpy>=1.26.0
+
+# Config & I/O.
 omegaconf>=2.3.0
-jsonlines>=4.0.0
 loguru>=0.7.0
 tqdm>=4.66.0
-rank-eval>=0.1.3
-omegaconf>=2.3.0
+
+# NLP utilities.
 nltk>=3.8.0
+
+# Plots (scripts/09_plot_training_curves.py).
+matplotlib>=3.8.0
+
+# Tests.
 pytest>=8.0.0
-colbert-ir>=0.2.0
-ragatouille>=0.0.8
-huggingface_hub>=0.24.0
-accelerate

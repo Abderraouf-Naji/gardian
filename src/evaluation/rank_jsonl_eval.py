@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import pathlib
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -32,6 +32,63 @@ def load_rank_jsonl(path: str) -> List[Dict[str, Any]]:
             if line.strip():
                 records.append(json.loads(line))
     return records
+
+
+def iter_rank_jsonl_records(path: str) -> Iterator[Dict[str, Any]]:
+    """Stream rank JSONL lines without materializing the full file in memory."""
+    p = pathlib.Path(path)
+    if not p.exists():
+        logger.warning(f"File not found: {path}")
+        return
+    with p.open("r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                yield json.loads(line)
+
+
+def _batch_encode_query_misses(
+    need_encode: Dict[str, str],
+    *,
+    query_encoder_name: str,
+    query_encoder_device: str,
+    model_query_dim: Optional[int],
+    batch_size: int = 128,
+) -> Dict[str, List[float]]:
+    """Batched SentenceTransformer encode for qids missing query_emb in rank JSONL."""
+    if not need_encode:
+        return {}
+    logger.info(
+        f"Encoding {len(need_encode)} unique queries in batches of {batch_size} "
+        f"({query_encoder_name!r} on {query_encoder_device!r})..."
+    )
+    enc = SentenceTransformer(query_encoder_name, device=query_encoder_device)
+    pairs = list(need_encode.items())
+    qids = [p[0] for p in pairs]
+    questions = [p[1] for p in pairs]
+    out: Dict[str, List[float]] = {}
+    batch_starts = range(0, len(questions), batch_size)
+    for start in tqdm(
+        batch_starts,
+        desc="Query embedding batches",
+        leave=False,
+        unit="batch",
+    ):
+        batch_q = questions[start : start + batch_size]
+        batch_ids = qids[start : start + batch_size]
+        embs = enc.encode(
+            batch_q,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        for qid, row in zip(batch_ids, embs):
+            emb = row.tolist()
+            if model_query_dim is not None and len(emb) != int(model_query_dim):
+                raise ValueError(
+                    f"Recomputed query_emb dim mismatch during eval: got={len(emb)} expected={model_query_dim}"
+                )
+            out[qid] = emb
+    return out
 
 
 def compute_mrr(ranked_ids: List[str], relevant_ids: List[str]) -> float:
@@ -74,16 +131,8 @@ def _new_query_bucket() -> Dict[str, Any]:
         "sparse_scores": [],
         "dense_scores": [],
         "fusion_scores": [],
-        "spladev3_scores": [],
+        "spladepp_scores": [],
     }
-
-
-def _infer_rank_retriever_type(records: List[Dict[str, Any]]) -> str:
-    for rec in records:
-        rt = str(rec.get("retriever_type", "")).strip()
-        if rt:
-            return rt
-    return ""
 
 
 def _baseline_result_keys(
@@ -96,12 +145,14 @@ def _baseline_result_keys(
     mapping: Dict[str, Tuple[str, str, str]] = {
         "bm25": ("sparse(bm25)", "dense(none)", "sparse(bm25)"),
         "faiss": ("sparse(none)", "dense(faiss)", "dense(faiss)"),
-        "colbert": ("sparse(none)", "dense(colbert)", "dense(colbert)"),
-        "spladev3": ("sparse(spladev3)", "dense(none)", "sparse(spladev3)"),
+        "medcpt": ("sparse(none)", "dense(medcpt)", "dense(medcpt)"),
+        "spladepp": ("sparse(spladepp)", "dense(none)", "sparse(spladepp)"),
         "hybrid": ("sparse(bm25)", "dense(faiss)", "sum(bm25,faiss)"),
-        "hybrid_neural": ("sparse(spladev3)", "dense(colbert)", "sum(spladev3,colbert)"),
+        "hybrid_neural": ("sparse(spladepp)", "dense(medcpt)", "sum(spladepp,medcpt)"),
         "hybrid_bm25_faiss": ("sparse(bm25)", "dense(faiss)", "sum(bm25,faiss)"),
-        "hybrid_spladev3_colbert": ("sparse(spladev3)", "dense(colbert)", "sum(spladev3,colbert)"),
+        "hybrid_bm25_medcpt": ("sparse(bm25)", "dense(medcpt)", "sum(bm25,medcpt)"),
+        "hybrid_spladepp_faiss": ("sparse(spladepp)", "dense(faiss)", "sum(spladepp,faiss)"),
+        "hybrid_spladepp_medcpt": ("sparse(spladepp)", "dense(medcpt)", "sum(spladepp,medcpt)"),
     }
     return mapping.get(rt, ("bm25", "dense", "hybrid"))
 
@@ -137,68 +188,6 @@ def _rrf_scores_for_query(
     return out
 
 
-def _prefill_query_emb_cache(
-    records: List[Dict[str, Any]],
-    *,
-    query_encoder_name: str,
-    query_encoder_device: str,
-    model_query_dim: Optional[int],
-    batch_size: int = 128,
-) -> Dict[str, List[float]]:
-    """Fill query id → embedding from JSONL or one batched SentenceTransformer pass."""
-    cache: Dict[str, List[float]] = {}
-    for rec in records:
-        qid = str(rec.get("qid", ""))
-        qe = rec.get("query_emb")
-        if isinstance(qe, list) and qe:
-            if qid not in cache:
-                cache[qid] = qe
-
-    need_encode: Dict[str, str] = {}
-    for rec in records:
-        qid = str(rec.get("qid", ""))
-        if qid in cache:
-            continue
-        question = rec.get("question")
-        if isinstance(question, str) and question.strip():
-            need_encode.setdefault(qid, question.strip())
-
-    if not need_encode:
-        return cache
-
-    logger.info(
-        f"Encoding {len(need_encode)} unique queries in batches of {batch_size} "
-        f"({query_encoder_name!r} on {query_encoder_device!r})..."
-    )
-    enc = SentenceTransformer(query_encoder_name, device=query_encoder_device)
-    pairs = list(need_encode.items())
-    qids = [p[0] for p in pairs]
-    questions = [p[1] for p in pairs]
-    batch_starts = range(0, len(questions), batch_size)
-    for start in tqdm(
-        batch_starts,
-        desc="Query embedding batches",
-        leave=False,
-        unit="batch",
-    ):
-        batch_q = questions[start : start + batch_size]
-        batch_ids = qids[start : start + batch_size]
-        embs = enc.encode(
-            batch_q,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-        )
-        for qid, row in zip(batch_ids, embs):
-            emb = row.tolist()
-            if model_query_dim is not None and len(emb) != int(model_query_dim):
-                raise ValueError(
-                    f"Recomputed query_emb dim mismatch during eval: got={len(emb)} expected={model_query_dim}"
-                )
-            cache[qid] = emb
-    return cache
-
-
 def evaluate_all_from_rank_data(
     rank_data_path: str,
     model: Optional[GARDIAN] = None,
@@ -221,27 +210,112 @@ def evaluate_all_from_rank_data(
     ``bm25`` / ``dense`` / ``hybrid``.
     """
     logger.info(f"Loading rank data: {rank_data_path}")
-    records = load_rank_jsonl(rank_data_path)
-    if not records:
+    p = pathlib.Path(rank_data_path)
+    if not p.exists():
+        logger.warning(f"File not found: {rank_data_path}")
+        return {}
+
+    def _resolve_sparse_score(rec: Dict[str, Any]) -> float:
+        # Prefer explicit retriever score fields when available.
+        retriever_type = str(rec.get("retriever_type", ""))
+        if retriever_type in {"faiss", "medcpt"}:
+            return 0.0
+        if retriever_type in {
+            "hybrid",
+            "hybrid_bm25_faiss",
+            "hybrid_bm25_medcpt",
+            "bm25",
+        }:
+            if rec.get("bm25_score") is not None:
+                return float(rec.get("bm25_score", 0.0))
+        if retriever_type in {
+            "hybrid_neural",
+            "hybrid_spladepp_faiss",
+            "hybrid_spladepp_medcpt",
+            "spladepp",
+        }:
+            if rec.get("spladepp_score") is not None:
+                return float(rec.get("spladepp_score", 0.0))
+        sparse_feats = rec.get("sparse_feats") or [0.0]
+        return float(sparse_feats[0] if sparse_feats else 0.0)
+
+    def _resolve_dense_score(rec: Dict[str, Any]) -> float:
+        if "dense_score" in rec:
+            return float(rec["dense_score"])
+        retriever_type = str(rec.get("retriever_type", ""))
+        if retriever_type in ("bm25", "spladepp"):
+            return 0.0
+        dense_feats = rec.get("dense_feats") or [0.0]
+        return float(dense_feats[0] if dense_feats else 0.0)
+
+    queries: Dict[str, Dict[str, Any]] = defaultdict(_new_query_bucket)
+    first_rec: Optional[Dict[str, Any]] = None
+    rank_retriever_type = ""
+    query_emb_prefill: Dict[str, List[float]] = {}
+    pending_q: Dict[str, str] = {}
+    want_query_cache = (
+        model is not None and device is not None and bool(query_encoder_name)
+    )
+
+    for rec in iter_rank_jsonl_records(rank_data_path):
+        if first_rec is None:
+            first_rec = rec
+        rt = str(rec.get("retriever_type", "")).strip()
+        if rt and not rank_retriever_type:
+            rank_retriever_type = rt
+        qid = rec["qid"]
+        sparse_score = _resolve_sparse_score(rec)
+        dense_score = _resolve_dense_score(rec)
+        fusion_score = float(sparse_score) + float(dense_score)
+
+        queries[qid]["candidates"].append({"pid": rec["pid"], "label": rec["label"]})
+        queries[qid]["sparse_scores"].append(sparse_score)
+        queries[qid]["dense_scores"].append(dense_score)
+        queries[qid]["fusion_scores"].append(fusion_score)
+        queries[qid]["spladepp_scores"].append(float(rec.get("spladepp_score", 0.0)))
+
+        if want_query_cache:
+            qid_s = str(rec.get("qid", ""))
+            qe = rec.get("query_emb")
+            if isinstance(qe, list) and qe:
+                if qid_s not in query_emb_prefill:
+                    query_emb_prefill[qid_s] = qe
+                pending_q.pop(qid_s, None)
+            else:
+                question = rec.get("question")
+                if (
+                    isinstance(question, str)
+                    and question.strip()
+                    and qid_s not in query_emb_prefill
+                ):
+                    pending_q.setdefault(qid_s, question.strip())
+
+    if not queries:
         return {}
 
     model_query_dim: Optional[int] = None
-    if model is not None:
+    if model is not None and first_rec is not None:
         first_layer = getattr(getattr(model, "controller", None), "net", None)
         try:
             if first_layer is not None and hasattr(first_layer[0], "in_features"):
-                qtype_dim = len(records[0].get("qtype_onehot", []))
+                qtype_dim = len(first_rec.get("qtype_onehot", []))
                 model_query_dim = int(first_layer[0].in_features) - int(qtype_dim) - 1
         except Exception:
             model_query_dim = None
+
     query_emb_cache: Dict[str, List[float]] = {}
-    if model is not None and device is not None and query_encoder_name:
-        query_emb_cache = _prefill_query_emb_cache(
-            records,
-            query_encoder_name=query_encoder_name,
-            query_encoder_device=query_encoder_device,
-            model_query_dim=model_query_dim,
+    if want_query_cache:
+        need_encode = {k: v for k, v in pending_q.items() if k not in query_emb_prefill}
+        query_emb_cache = dict(query_emb_prefill)
+        query_emb_cache.update(
+            _batch_encode_query_misses(
+                need_encode,
+                query_encoder_name=query_encoder_name,
+                query_encoder_device=query_encoder_device,
+                model_query_dim=model_query_dim,
+            )
         )
+
     query_encoder = None
 
     def _resolve_query_emb(rec: Dict[str, Any]) -> List[float]:
@@ -276,7 +350,6 @@ def evaluate_all_from_rank_data(
         query_emb_cache[qid] = emb
         return emb
 
-    queries: Dict[str, Dict[str, Any]] = defaultdict(_new_query_bucket)
     gardian_features: Dict[str, Dict[str, Any]] = defaultdict(
         lambda: {
             "sparse_feats": [],
@@ -289,47 +362,13 @@ def evaluate_all_from_rank_data(
         }
     )
 
-    def _resolve_sparse_score(rec: Dict[str, Any]) -> float:
-        # Prefer explicit retriever score fields when available.
-        retriever_type = str(rec.get("retriever_type", ""))
-        if retriever_type in {"faiss", "colbert"}:
-            return 0.0
-        if retriever_type in {"hybrid", "hybrid_bm25_faiss", "bm25"}:
-            if rec.get("bm25_score") is not None:
-                return float(rec.get("bm25_score", 0.0))
-        if retriever_type in {"hybrid_neural", "hybrid_spladev3_colbert", "spladev3"}:
-            if rec.get("spladev3_score") is not None:
-                return float(rec.get("spladev3_score", 0.0))
-        sparse_feats = rec.get("sparse_feats") or [0.0]
-        return float(sparse_feats[0] if sparse_feats else 0.0)
-
-    def _resolve_dense_score(rec: Dict[str, Any]) -> float:
-        if "dense_score" in rec:
-            return float(rec["dense_score"])
-        retriever_type = str(rec.get("retriever_type", ""))
-        if retriever_type in ("bm25", "spladev3"):
-            return 0.0
-        dense_feats = rec.get("dense_feats") or [0.0]
-        return float(dense_feats[0] if dense_feats else 0.0)
-
-    rank_retriever_type = _infer_rank_retriever_type(records)
     sparse_key, dense_key, fusion_key = _baseline_result_keys(
         rank_retriever_type, canonical_baseline_keys=canonical_baseline_keys
     )
 
-    for rec in records:
-        qid = rec["qid"]
-        sparse_score = _resolve_sparse_score(rec)
-        dense_score = _resolve_dense_score(rec)
-        fusion_score = float(sparse_score) + float(dense_score)
-
-        queries[qid]["candidates"].append({"pid": rec["pid"], "label": rec["label"]})
-        queries[qid]["sparse_scores"].append(sparse_score)
-        queries[qid]["dense_scores"].append(dense_score)
-        queries[qid]["fusion_scores"].append(fusion_score)
-        queries[qid]["spladev3_scores"].append(float(rec.get("spladev3_score", 0.0)))
-
-        if model is not None and device is not None:
+    if model is not None and device is not None:
+        for rec in iter_rank_jsonl_records(rank_data_path):
+            qid = rec["qid"]
             gardian_features[qid]["candidates"].append(
                 {"pid": rec["pid"], "label": rec["label"]}
             )
@@ -438,11 +477,11 @@ def evaluate_all_from_rank_data(
         _emit(label, internal_key)
 
     _emit("rrf", "rrf_scores")
-    skip_standalone_spladev3 = bool(
-        canonical_baseline_keys and sparse_key == "sparse(spladev3)"
+    skip_standalone_spladepp = bool(
+        canonical_baseline_keys and sparse_key == "sparse(spladepp)"
     )
-    if not skip_standalone_spladev3:
-        for name, key in [("spladev3", "spladev3_scores")]:
+    if not skip_standalone_spladepp:
+        for name, key in [("spladepp", "spladepp_scores")]:
             if _score_key_has_nonzero_signal(qdict, key):
                 logger.info(f"  Evaluating {name}...")
                 m, pq, no_pos = metrics_from_score_key(queries, key, collect_per_query)

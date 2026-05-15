@@ -4,13 +4,19 @@ GARDIAN Re-ranking Model
 Architecture (Section 3 of the paper):
   - Three feature branches (Sparse, Dense, KG), each a 2-layer MLP → scalar score
   - Query-adaptive controller: encodes query + auxiliary signals → softmax weights (α, β, γ)
-  - Fusion: final_score = α·sparse + β·dense + γ·kg
+  - Fusion: final_score = α·sparse + β·dense 
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
+
+
+def _cfg_get(cfg: Any, key: str, default: Any = None) -> Any:
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
 
 
 class BranchMLP(nn.Module):
@@ -278,6 +284,21 @@ class GARDIAN(nn.Module):
             )
 
         return sorted(candidates, key=lambda x: x["gardian_score"], reverse=True)
+
+
+def build_gardian_from_model_cfg(model_cfg: Any) -> GARDIAN:
+    """Instantiate GARDIAN from a config object or checkpoint config dict."""
+    question_types = _cfg_get(model_cfg, "question_types", [])
+    return GARDIAN(
+        sparse_dim=int(_cfg_get(model_cfg, "sparse_feat_dim", 3)),
+        dense_dim=int(_cfg_get(model_cfg, "dense_feat_dim", 4)),
+        kg_dim=int(_cfg_get(model_cfg, "kg_feat_dim", 6)),
+        branch_hidden=int(_cfg_get(model_cfg, "branch_hidden", 128)),
+        controller_hidden=int(_cfg_get(model_cfg, "controller_hidden", 128)),
+        query_feat_dim=int(_cfg_get(model_cfg, "query_feat_dim", 768)),
+        n_qtypes=len(question_types),
+        dropout=float(_cfg_get(model_cfg, "dropout", 0.1)),
+    )
 
 
 def _collate_candidates(candidates, query_features, device):

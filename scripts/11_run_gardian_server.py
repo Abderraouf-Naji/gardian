@@ -1,10 +1,15 @@
 """Persistent GARDIAN server: load once, answer many questions quickly.
 
+Pipeline per request:
+  1. Hybrid retrieval (BM25 ``index.pkl`` + FAISS ``faiss.index`` via ``rag_reader``)
+  2. GARDIAN rerank (α-weighted sparse / dense / KG fusion)
+  3. RAG reader on GARDIAN top-k passages
+
 Run in background:
-  .venv/bin/python scripts/11_run_guardian_server.py --port 8787
+  .venv/bin/python scripts/11_run_gardian_server.py --port 8787
 
 Ask from another terminal:
-  .venv/bin/python scripts/11_ask_guardian_live.py --question "..."
+  .venv/bin/python scripts/11_ask_gardian_live.py --question "..."
 """
 
 from __future__ import annotations
@@ -13,7 +18,6 @@ import argparse
 import json
 import os
 import pathlib
-import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,18 +48,21 @@ from sentence_transformers import SentenceTransformer
 sys.path.insert(0, ".")
 
 from src.common.question_types import assert_cfg_question_types, normalize_question_type, qtype_onehot
-from src.features.dense_feat import batch_cosines, compute_dense_features
+from src.common.rank_data_paths import normalize_retriever_name
+from src.features.dense_feat import compute_dense_features_with_score
 from src.features.kg_feat import build_degree_lookup, build_node_set, build_query_kg_cache, compute_kg_features
 from src.features.sparse import compute_sparse_features
 from src.kg.builder import load_kg
 from src.kg.linker import EntityLinker
-from src.model.gardian import GARDIAN
-from src.pipeline.rag_reader import load_hf_reader, run_reader_rag_block
-from src.retrieval.bm25 import BM25Retriever
-from src.retrieval.colbert import ColBERTRetriever
-from src.retrieval.dense import DenseRetriever
-from src.retrieval.hybrid import HybridBm25FaissRetriever, HybridSpladev3ColbertRetriever
-from src.retrieval.spladev3 import SpladeV3Retriever
+from src.model.gardian import GARDIAN, build_gardian_from_model_cfg
+from src.pipeline.online_feature_cache import OnlinePassageFeatureCache
+from src.pipeline.rag_reader import (
+    build_retriever_for_qa,
+    load_hf_reader,
+    resolve_retrieval_paths,
+    retrieve_hybrid_candidates,
+    run_reader_rag_block,
+)
 
 
 def infer_qtype(question: str, fallback: str) -> str:
@@ -84,61 +91,10 @@ def _require_kg_artifacts(cfg) -> None:
     raise FileNotFoundError(f"Missing KG artifacts: graph={kg_p}, lexical={lex_p}")
 
 
-def build_hybrid_retriever(cfg):
-    bm25 = BM25Retriever(index_dir="data/indices/bm25/unified")
-    dense = DenseRetriever(
-        faiss_index_path="data/indices/faiss/unified/faiss.index",
-        meta_path="data/indices/faiss/unified/faiss_meta.jsonl",
-        encoder_name=cfg.encoder.model_name,
-        batch_size=int(cfg.encoder.batch_size),
-        max_length=int(cfg.encoder.max_length),
-        device="cuda" if torch.cuda.is_available() else "cpu",
-    )
-    return HybridBm25FaissRetriever(
-        bm25=bm25,
-        dense=dense,
-        top_k_bm25=int(cfg.retrieval.top_k_bm25),
-        top_k_dense=int(cfg.retrieval.top_k_faiss),
-    )
-
-
-def build_hybrid_neural_retriever(cfg):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    spladev3 = SpladeV3Retriever(
-        index_path="data/indices/spladev3/unified",
-        model_name=cfg.retrieval.get("spladev3_encoder", "naver/splade-v3-distilbert"),
-        device=device,
-        batch_size=int(cfg.retrieval.get("spladev3_batch_size", 256)),
-        max_length=int(cfg.retrieval.get("spladev3_max_length", 256)),
-    )
-    colbert = ColBERTRetriever(
-        index_path="data/indices/colbert/unified",
-        model_name=cfg.retrieval.get("colbert_encoder", "BAAI/bge-large-en-v1.5"),
-        device=device,
-        batch_size=int(cfg.retrieval.get("colbert_batch_size", 256)),
-        max_length=int(cfg.retrieval.get("colbert_max_length", 256)),
-    )
-    return HybridSpladev3ColbertRetriever(
-        spladev3=spladev3,
-        colbert=colbert,
-        top_k_spladev3=int(cfg.retrieval.get("top_k_spladev3", 50)),
-        top_k_colbert=int(cfg.retrieval.get("top_k_colbert", 50)),
-    )
-
-
 def load_gardian(cfg, retriever: str, device: str) -> GARDIAN:
-    model = GARDIAN(
-        sparse_dim=int(cfg.model.sparse_feat_dim),
-        dense_dim=int(cfg.model.dense_feat_dim),
-        kg_dim=int(cfg.model.kg_feat_dim),
-        branch_hidden=int(cfg.model.branch_hidden),
-        controller_hidden=int(cfg.model.controller_hidden),
-        query_feat_dim=int(cfg.model.query_feat_dim),
-        n_qtypes=len(cfg.model.question_types),
-        dropout=float(cfg.model.dropout),
-    )
     out_dir = pathlib.Path(cfg.paths.results_dir)
-    ckpt_path = out_dir / f"gardian_best_{retriever}.pt"
+    canonical = normalize_retriever_name(retriever)
+    ckpt_path = out_dir / f"gardian_best_{canonical}.pt"
     if not ckpt_path.exists():
         legacy = out_dir / "gardian_best.pt"
         if legacy.exists():
@@ -149,21 +105,34 @@ def load_gardian(cfg, retriever: str, device: str) -> GARDIAN:
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     except TypeError:
         ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt_model_cfg = ckpt.get("cfg", {}).get("model") if isinstance(ckpt.get("cfg"), dict) else None
+    model = build_gardian_from_model_cfg(ckpt_model_cfg or cfg.model)
     model.load_state_dict(ckpt["model_state"])
     model.to(device)
     model.eval()
     return model
 
 
-class GuardianRuntime:
-    def __init__(self, cfg_path: str, retriever_name: str, device: str | None, top_candidates: int | None, top_passages: int | None, max_new_tokens: int | None):
+class GardianRuntime:
+    def __init__(
+        self,
+        cfg_path: str,
+        retriever_name: str,
+        device: str | None,
+        top_candidates: int | None,
+        top_passages: int | None,
+        max_new_tokens: int | None,
+        no_reader: bool = False,
+    ):
         self.cfg = OmegaConf.load(cfg_path)
         assert_cfg_question_types(self.cfg.model.question_types)
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.retriever_name = retriever_name
-        self.top_candidates = int(top_candidates or 400)
+        self.retriever_name = normalize_retriever_name(retriever_name)
+        pool_default = int(getattr(self.cfg.retrieval, "candidate_pool_size", 100))
+        self.top_candidates = int(top_candidates or pool_default)
         self.top_passages = int(top_passages or self.cfg.qa.top_k_passages)
         self.max_new_tokens = int(max_new_tokens or self.cfg.qa.max_new_tokens)
+        self.no_reader = bool(no_reader)
 
         logger.info("Loading KG + linker (startup only)...")
         _require_kg_artifacts(self.cfg)
@@ -173,96 +142,104 @@ class GuardianRuntime:
         self.node_set = build_node_set(self.kg)
 
         logger.info("Loading retriever + encoders (startup only)...")
-        self.retriever = build_hybrid_retriever(self.cfg) if retriever_name == "hybrid" else build_hybrid_neural_retriever(self.cfg)
+        idx_paths = resolve_retrieval_paths(self.cfg)
+        logger.info(
+            f"Sparse index: {idx_paths['bm25_index_pkl']} | "
+            f"Dense index: {idx_paths['faiss_index']}"
+        )
+        self.retriever = build_retriever_for_qa(self.cfg, self.retriever_name, device=self.device)
         self.encoder = SentenceTransformer(self.cfg.encoder.model_name, device=self.device)
+        self.feature_cache = OnlinePassageFeatureCache(
+            embedding_index_path=idx_paths["faiss_index"],
+            embedding_meta_path=idx_paths["faiss_meta"],
+            linker=self.linker,
+            encoder=self.encoder,
+        )
 
-        logger.info("Loading GARDIAN + reader (startup only)...")
-        self.gardian = load_gardian(self.cfg, retriever_name, self.device)
-        self.tokenizer, self.reader = load_hf_reader(self.cfg.qa.reader_model, self.device)
+        logger.info("Loading GARDIAN (startup only)...")
+        self.gardian = load_gardian(self.cfg, self.retriever_name, self.device)
+        self.tokenizer = None
+        self.reader = None
+        if not self.no_reader:
+            logger.info("Loading reader (startup only)...")
+            self.tokenizer, self.reader = load_hf_reader(self.cfg.qa.reader_model, self.device)
         logger.success("GARDIAN server is warm and ready.")
 
-    @staticmethod
-    def _reader_focus_terms(question: str) -> List[str]:
-        stop = {
-            "what", "which", "when", "where", "why", "how", "with", "without", "from", "into", "through",
-            "about", "this", "that", "these", "those", "versus", "vs", "compared", "placebo", "adults",
-            "patients", "patient", "established", "evidence", "trial", "trials", "pathway", "pathways",
-            "reduce", "reduced", "reducing", "effect", "effects", "both", "type", "diabetes", "ascvd",
-        }
-        toks = re.findall(r"[a-z0-9][a-z0-9\-\+]{2,}", question.lower())
-        uniq: List[str] = []
-        for t in toks:
-            if t in stop:
-                continue
-            if t not in uniq:
-                uniq.append(t)
-        # keep strongest medical anchors first
-        priority = [t for t in uniq if any(x in t for x in ("sglt2", "empagliflozin", "dapagliflozin", "canagliflozin", "hospital", "failure", "cvot"))]
-        rest = [t for t in uniq if t not in priority]
-        return (priority + rest)[:10]
-
-    def _select_reader_passages(self, question: str, ranked: List[Dict]) -> List[Dict]:
-        terms = self._reader_focus_terms(question)
-        if not terms:
-            return ranked[: self.top_passages]
-        rescored = []
-        for c in ranked[: max(self.top_passages * 6, 40)]:
-            text = (c.get("text", "") or "").lower()
-            hits = sum(1 for t in terms if t in text)
-            overlap = hits / max(1, len(terms))
-            boosted = float(c.get("gardian_score", 0.0)) + 1.2 * overlap
-            d = dict(c)
-            d["reader_focus_overlap"] = overlap
-            d["reader_focus_score"] = boosted
-            rescored.append(d)
-        rescored.sort(key=lambda x: float(x.get("reader_focus_score", -1e9)), reverse=True)
-        return rescored[: self.top_passages]
-
-    def ask(self, question: str, question_type: str = "other", use_react: bool | None = None) -> Dict:
+    def ask(
+        self,
+        question: str,
+        question_type: str = "other",
+        use_react: bool | None = None,
+        no_reader: bool | None = None,
+    ) -> Dict:
         question = (question or "").strip()
         if not question:
             raise ValueError("Question cannot be empty.")
 
         qtype = infer_qtype(question, question_type)
+        skip_reader = self.no_reader if no_reader is None else bool(no_reader)
         use_react = bool(self.cfg.qa.get("reader_react", False)) if use_react is None else bool(use_react)
         react_max_steps = int(self.cfg.qa.get("reader_react_max_steps", 6))
         react_tokens = self.cfg.qa.get("reader_react_tokens_per_step")
         react_tokens = int(react_tokens) if react_tokens is not None else None
 
-        candidates = self.retriever.retrieve(question)[: self.top_candidates]
+        candidates = retrieve_hybrid_candidates(
+            question,
+            self.retriever,
+            top_k=self.top_candidates,
+        )
         if not candidates:
-            return {"question": question, "question_type": qtype, "answer": "I don't know", "top_passages": []}
+            return {
+                "ok": True,
+                "question": question,
+                "question_type": qtype,
+                "retriever": self.retriever_name,
+                "answer": "I don't know",
+                "top_passages": [],
+            }
 
         qtype_oh = qtype_onehot(qtype)
         q_emb = self.encoder.encode([question], normalize_embeddings=True, show_progress_bar=False, convert_to_numpy=True)[0]
-        p_texts = [c.get("text", "") for c in candidates]
-        p_embs = self.encoder.encode(p_texts, normalize_embeddings=True, show_progress_bar=False, convert_to_numpy=True)
-        cosines = batch_cosines(q_emb, p_embs)
-        cos_mean = float(np.mean(cosines))
-        cos_std = float(np.std(cosines) + 1e-8)
+        # Fast online path: passage embeddings are reconstructed from the
+        # pre-built FAISS index instead of re-encoding candidate text.
+        p_embs = self.feature_cache.get_passage_embeddings(candidates)
+        active_dense_scores = [
+            float(c.get("medcpt_score", c.get("dense_score", c.get("score", 0.0))))
+            for c in candidates
+        ]
+        dense_score_mean = float(np.mean(active_dense_scores))
+        dense_score_std = float(np.std(active_dense_scores) + 1e-8)
 
         q_entities = self.linker.link(question)
         kg_coverage = 1.0 if q_entities else 0.0
-        query_kg_cache = build_query_kg_cache(q_entities, self.kg, node_set=self.node_set)
+        query_kg_cache = build_query_kg_cache(
+            q_entities,
+            self.kg,
+            node_set=self.node_set,
+            compute_distances=bool(getattr(self.cfg.kg, "exact_distance_features", False)),
+            max_path=int(getattr(self.cfg.kg, "max_path_length", 4)),
+        )
 
         for i, cand in enumerate(candidates):
-            p_entities = self.linker.link(cand.get("text", ""))
+            p_entities = self.feature_cache.get_passage_entities(cand)
             cand["sparse_feats"] = compute_sparse_features(
                 query=question,
                 passage=cand.get("text", ""),
-                bm25_score=float(cand.get("bm25_score", cand.get("spladev3_score", 0.0))),
+                bm25_score=float(cand.get("bm25_score", cand.get("spladepp_score", 0.0))),
                 idf_table=None,
             ).tolist()
-            cand["dense_feats"] = compute_dense_features(
+            cand["dense_feats"] = compute_dense_features_with_score(
                 q_emb=q_emb,
                 p_emb=p_embs[i],
-                cosine_mean=cos_mean,
-                cosine_std=cos_std,
+                dense_score=active_dense_scores[i],
+                score_mean=dense_score_mean,
+                score_std=dense_score_std,
             ).tolist()
             cand["kg_feats"] = compute_kg_features(
                 q_entities=q_entities,
                 p_entities=p_entities,
                 G=self.kg,
+                max_path=int(getattr(self.cfg.kg, "max_path_length", 4)),
                 query_cache=query_kg_cache,
                 degree_lookup=self.degree_lookup,
                 node_set=self.node_set,
@@ -273,41 +250,66 @@ class GuardianRuntime:
             query_features={"query_emb": q_emb.tolist(), "qtype_onehot": qtype_oh, "kg_coverage": kg_coverage},
             device=self.device,
         )
-        top_for_reader = self._select_reader_passages(question, ranked)
+        # GARDIAN-ordered top-k → RAG reader (same as scripts/08_ask_gardian.py).
+        top_for_reader = ranked[: self.top_passages]
         first = ranked[0]
         sparse_alfa = float(first["sparse_alfa"])
         dense_alfa = float(first["dense_alfa"])
         kg_alfa = float(first["kg_alfa"])
 
-        answer = run_reader_rag_block(
-            question=question,
-            passages_top_k=top_for_reader,
-            tokenizer=self.tokenizer,
-            reader_model=self.reader,
-            device=self.device,
-            top_k_passages=self.top_passages,
-            max_new_tokens=self.max_new_tokens,
-            max_input_length=int(self.cfg.qa.get("reader_max_input_length", 2048) or 2048),
-            question_type=qtype,
-            alpha_sparse=sparse_alfa,
-            alpha_dense=dense_alfa,
-            alpha_kg=kg_alfa,
-            include_signal_features=True,
-            use_react=use_react,
-            react_max_steps=react_max_steps,
-            react_tokens_per_step=react_tokens,
-        )
-        answer = (answer or "").strip() or "I don't know"
+        if skip_reader:
+            answer = ""
+        else:
+            if self.tokenizer is None or self.reader is None:
+                raise RuntimeError("Reader was not loaded at startup; restart without --no-reader.")
+            answer = run_reader_rag_block(
+                question=question,
+                passages_top_k=top_for_reader,
+                tokenizer=self.tokenizer,
+                reader_model=self.reader,
+                device=self.device,
+                top_k_passages=self.top_passages,
+                max_new_tokens=self.max_new_tokens,
+                max_input_length=int(self.cfg.qa.get("reader_max_input_length", 2048) or 2048),
+                question_type=qtype,
+                alpha_sparse=sparse_alfa,
+                alpha_dense=dense_alfa,
+                alpha_kg=kg_alfa,
+                include_signal_features=True,
+                use_react=use_react,
+                react_max_steps=react_max_steps,
+                react_tokens_per_step=react_tokens,
+            )
+            answer = (answer or "").strip() or "I don't know"
 
         return {
+            "ok": True,
             "question": question,
             "question_type": qtype,
+            "retriever": self.retriever_name,
+            "reader_skipped": skip_reader,
+            "reader_react": use_react,
             "answer": answer,
+            "fusion_formula": "score = alpha_sparse*sparse + alpha_dense*dense + alpha_kg*kg",
             "sparse_alfa": sparse_alfa,
             "dense_alfa": dense_alfa,
             "kg_alfa": kg_alfa,
+            "rag_how_used": (
+                "BM25+FAISS candidates → GARDIAN rerank by fused branch scores → "
+                "top passages sent to the reader LLM."
+            ),
             "top_passages": [
-                {"rank": i + 1, "pid": c.get("id"), "text_preview": (c.get("text", "") or "")[:220]}
+                {
+                    "rank": i + 1,
+                    "pid": c.get("id"),
+                    "gardian_score": float(c.get("gardian_score", 0.0)),
+                    "bm25_score": float(c.get("bm25_score", 0.0)),
+                    "dense_score": float(c.get("dense_score", 0.0)),
+                    "sparse_contribution": float(c.get("sparse_contribution", 0.0)),
+                    "dense_contribution": float(c.get("dense_contribution", 0.0)),
+                    "kg_contribution": float(c.get("kg_contribution", 0.0)),
+                    "text_preview": (c.get("text", "") or "")[:260],
+                }
                 for i, c in enumerate(top_for_reader)
             ],
         }
@@ -316,13 +318,29 @@ class GuardianRuntime:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run persistent GARDIAN server.")
     p.add_argument("--cfg", type=str, default="configs/base.yaml")
-    p.add_argument("--retriever", type=str, choices=["hybrid", "hybrid_neural"], default="hybrid")
+    p.add_argument(
+        "--retriever",
+        type=str,
+        choices=["hybrid", "hybrid_bm25_faiss", "hybrid_neural", "hybrid_spladepp_medcpt"],
+        default="hybrid",
+        help="hybrid → BM25+FAISS (unified indices); hybrid_neural → SPLADE++ + MedCPT.",
+    )
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--host", type=str, default="127.0.0.1")
     p.add_argument("--port", type=int, default=8787)
-    p.add_argument("--top-candidates", type=int, default=400)
+    p.add_argument(
+        "--top-candidates",
+        type=int,
+        default=None,
+        help="Candidate pool before GARDIAN rerank (default: retrieval.candidate_pool_size in cfg).",
+    )
     p.add_argument("--top-passages", type=int, default=None)
     p.add_argument("--max-new-tokens", type=int, default=None)
+    p.add_argument(
+        "--no-reader",
+        action="store_true",
+        help="Serve only GARDIAN scores/ranking; do not load the LLM reader.",
+    )
     return p.parse_args()
 
 
@@ -332,13 +350,14 @@ def main() -> None:
 
     def _load_runtime() -> None:
         try:
-            rt = GuardianRuntime(
+            rt = GardianRuntime(
                 cfg_path=args.cfg,
                 retriever_name=args.retriever,
                 device=args.device,
                 top_candidates=args.top_candidates,
                 top_passages=args.top_passages,
                 max_new_tokens=args.max_new_tokens,
+                no_reader=bool(args.no_reader),
             )
             state["runtime"] = rt
             state["ready"] = True
@@ -384,8 +403,14 @@ def main() -> None:
                 question = data.get("question", "")
                 qtype = data.get("question_type", "other")
                 use_react = data.get("reader_react", None)
+                no_reader = data.get("no_reader", data.get("score_only", None))
                 runtime = state["runtime"]
-                result = runtime.ask(question=question, question_type=qtype, use_react=use_react)
+                result = runtime.ask(
+                    question=question,
+                    question_type=qtype,
+                    use_react=use_react,
+                    no_reader=no_reader,
+                )
                 self._send_json(200, result)
             except Exception as e:
                 logger.exception("Request failed")

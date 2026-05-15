@@ -1,7 +1,7 @@
 """Ask a running GARDIAN server (fast path, no model reload).
 
 Usage:
-  .venv/bin/python scripts/11_ask_guardian_live.py --question "..."
+  .venv/bin/python scripts/11_ask_gardian_live.py --question "..."
 """
 
 from __future__ import annotations

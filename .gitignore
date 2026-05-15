@@ -34,7 +34,7 @@ pip-wheel-metadata/
 # ----------------------
 results/
 *.log
-guardian_server.log
+gardian_server.log
 
 # ----------------------
 # DATA (CRITICAL)

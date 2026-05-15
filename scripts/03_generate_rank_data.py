@@ -1,5 +1,5 @@
 """
-Script 03– Generate ranking data for GARDIAN offline training.
+Script 03 – Generate ranking data for GARDIAN offline training.
 
 Datasets supported:
   - PubMedQA (artificial + labeled)
@@ -8,7 +8,7 @@ Datasets supported:
 What this script does
 ---------------------
 For each query in each split:
-1. Run retrieval (bm25 / faiss / spladev3 / colbert / hybrid families)
+1. Run retrieval (bm25 / faiss / spladepp / medcpt / hybrid families)
 2. Build candidate pool from unified OR per-corpus indices
 3. Compute sparse, dense, and KG features for every candidate
 4. Label candidate positive ONLY if passage ID is in gold_passage_ids
@@ -16,18 +16,25 @@ For each query in each split:
 6. Save JSONL records for training/dev ranking
 
 Usage:
-    # Hybrid (BM25 + FAISS)
-    python scripts/03_generate_rank_data.py --retriever hybrid
+    # The 4 hybrid families used in the paper:
+    python scripts/03_generate_rank_data.py --retriever hybrid_bm25_faiss
+    python scripts/03_generate_rank_data.py --retriever hybrid_bm25_medcpt
+    python scripts/03_generate_rank_data.py --retriever hybrid_spladepp_faiss
+    python scripts/03_generate_rank_data.py --retriever hybrid_spladepp_medcpt
 
-    # Hybrid neural (SPLADEv3 + ColBERT)
-    python scripts/03_generate_rank_data.py --retriever hybrid_neural
-    
-    # With unified index
-    python scripts/03_generate_rank_data.py --mode unified --retriever hybrid
-    
-Neural first-stage baselines (SPLADEv3 / ColBERT+SPLADEv3) require one rank JSONL per
-``--retriever``; evaluation (``05_evaluate_gardian.py`` / ``rank_jsonl_eval``)
-adds SPLADEv3 columns whenever ``spladev3_score`` is non-zero (hybrid runs zero-fill).
+    # Run all four sequentially:
+    python scripts/03_generate_rank_data.py --retriever all
+
+    # Single-retriever baselines (kept for ablations only, not training):
+    python scripts/03_generate_rank_data.py --retriever bm25
+    python scripts/03_generate_rank_data.py --retriever faiss
+    python scripts/03_generate_rank_data.py --retriever spladepp
+    python scripts/03_generate_rank_data.py --retriever medcpt
+
+Each hybrid record carries both retrievers' raw scores (e.g. ``bm25_score`` and
+``dense_score`` for ``hybrid_bm25_faiss``), so single-retriever baselines can
+be evaluated by reading the relevant score column from the hybrid rank-data
+without re-running the slow encoding pass.
 """
 
 import json
@@ -39,7 +46,7 @@ import sys
 import hashlib
 import platform
 import pickle
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -52,7 +59,9 @@ from tqdm import tqdm
 
 sys.path.insert(0, ".")
 
-from src.features.dense_feat import batch_cosines, compute_dense_features
+from src.features.dense_feat import (
+    compute_dense_features_with_score,
+)
 from src.features.kg_feat import (
     build_degree_lookup,
     build_node_set,
@@ -67,10 +76,12 @@ from src.retrieval.dense import DenseRetriever
 from src.retrieval.hybrid import (
     DualHybridRetriever,
     HybridBm25FaissRetriever,
-    HybridSpladev3ColbertRetriever,
+    HybridBm25MedcptRetriever,
+    HybridSpladePPFaissRetriever,
+    HybridSpladePPMedcptRetriever,
 )
-from src.retrieval.spladev3 import SpladeV3Retriever
-from src.retrieval.colbert import ColBERTRetriever
+from src.retrieval.spladepp import SpladePPRetriever
+from src.retrieval.medcpt import MedCPTRetriever
 from src.common.question_types import normalize_question_type, qtype_onehot
 from src.common.rank_data_paths import normalize_retriever_name, rank_data_file
 
@@ -118,6 +129,25 @@ def set_all_seeds(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _lru_touch(od: OrderedDict, key: str, max_entries: Optional[int]) -> None:
+    if max_entries and max_entries > 0 and key in od:
+        od.move_to_end(key)
+
+
+def _lru_put(
+    od: OrderedDict,
+    key: str,
+    value: List,
+    max_entries: Optional[int],
+) -> None:
+    if key in od:
+        del od[key]
+    od[key] = value
+    if max_entries and max_entries > 0:
+        while len(od) > max_entries:
+            od.popitem(last=False)
 
 def read_jsonl(path: str) -> List[Dict]:
     if not os.path.exists(path):
@@ -225,8 +255,8 @@ def _index_paths(dataset_key: str) -> Dict[str, pathlib.Path]:
         "bm25_dir": root / "bm25" / dataset_key,
         "faiss_path": root / "faiss" / dataset_key / "faiss.index",
         "faiss_meta": root / "faiss" / dataset_key / "faiss_meta.jsonl",
-        "spladev3_dir": root / "spladev3" / dataset_key,
-        "colbert_dir": root / "colbert" / dataset_key,
+        "spladepp_dir": root / "spladepp" / dataset_key,
+        "medcpt_dir": root / "medcpt" / dataset_key,
     }
 
 
@@ -282,48 +312,93 @@ def get_faiss_retriever(dataset_key: str, cfg) -> DenseRetriever:
     )
 
 
-def get_spladev3_retriever(dataset_key: str, cfg) -> SpladeV3Retriever:
+def get_spladepp_retriever(dataset_key: str, cfg) -> SpladePPRetriever:
     paths = _index_paths(dataset_key)
-    splade_dir = paths["spladev3_dir"]
-    if not (splade_dir / "spladev3_index.pt").exists():
-        raise FileNotFoundError(f"SPLADEv3 index not found: {splade_dir / 'spladev3_index.pt'}")
-    return SpladeV3Retriever(
+    splade_dir = paths["spladepp_dir"]
+    if not SpladePPRetriever.index_ready(str(splade_dir)):
+        raise FileNotFoundError(f"SPLADE++ index not found/ready: {splade_dir}")
+    return SpladePPRetriever(
         index_path=str(splade_dir),
-        model_name=str(cfg.retrieval.get("spladev3_encoder", "naver/splade-v3-distilbert")),
+        model_name=str(
+            cfg.retrieval.get(
+                "spladepp_encoder", "naver/splade-cocondenser-ensembledistil"
+            )
+        ),
         device="cuda" if torch.cuda.is_available() else "cpu",
-        batch_size=int(cfg.retrieval.get("spladev3_batch_size", cfg.encoder.batch_size)),
-        max_length=int(cfg.retrieval.get("spladev3_max_length", cfg.encoder.max_length)),
+        batch_size=int(cfg.retrieval.get("spladepp_batch_size", 64)),
+        max_length=int(cfg.retrieval.get("spladepp_max_length", 256)),
     )
 
 
-def get_colbert_retriever(dataset_key: str, cfg) -> ColBERTRetriever:
+def get_medcpt_retriever(dataset_key: str, cfg) -> MedCPTRetriever:
     paths = _index_paths(dataset_key)
-    colbert_dir = paths["colbert_dir"]
-    if not ColBERTRetriever.index_ready(str(colbert_dir)):
-        raise FileNotFoundError(f"Native ColBERT index not found/ready: {colbert_dir}")
-    return ColBERTRetriever(
-        index_path=str(colbert_dir),
-        model_name=str(cfg.retrieval.get("colbert_encoder", "colbert-ir/colbertv2.0")),
+    medcpt_dir = paths["medcpt_dir"]
+    if not MedCPTRetriever.index_ready(str(medcpt_dir)):
+        raise FileNotFoundError(f"MedCPT index not found/ready: {medcpt_dir}")
+    return MedCPTRetriever(
+        index_path=str(medcpt_dir),
+        article_encoder=str(
+            cfg.retrieval.get("medcpt_article_encoder", "ncbi/MedCPT-Article-Encoder")
+        ),
+        query_encoder=str(
+            cfg.retrieval.get("medcpt_query_encoder", "ncbi/MedCPT-Query-Encoder")
+        ),
         device="cuda" if torch.cuda.is_available() else "cpu",
-        batch_size=int(cfg.retrieval.get("colbert_batch_size", cfg.encoder.batch_size)),
-        max_length=int(cfg.retrieval.get("colbert_max_length", cfg.encoder.max_length)),
+        batch_size=int(cfg.retrieval.get("medcpt_batch_size", 256)),
+        max_length=int(cfg.retrieval.get("medcpt_max_length", 512)),
     )
 
 
-def get_hybrid_spladev3_colbert_retriever(dataset_key: str, cfg) -> DualHybridRetriever:
-    """Create hybrid retriever (SPLADEv3 + ColBERT)."""
+def get_hybrid_spladepp_medcpt_retriever(dataset_key: str, cfg) -> DualHybridRetriever:
+    """Create hybrid retriever (SPLADE++ + MedCPT)."""
     paths = _index_paths(dataset_key)
-    if not (paths["spladev3_dir"] / "spladev3_index.pt").exists():
-        raise FileNotFoundError(f"SPLADEv3 index not found: {paths['spladev3_dir'] / 'spladev3_index.pt'}")
-    if not ColBERTRetriever.index_ready(str(paths["colbert_dir"])):
-        raise FileNotFoundError(f"Native ColBERT index not found/ready: {paths['colbert_dir']}")
-    spladev3 = get_spladev3_retriever(dataset_key, cfg)
-    colbert = get_colbert_retriever(dataset_key, cfg)
-    return HybridSpladev3ColbertRetriever(
-        spladev3=spladev3,
-        colbert=colbert,
-        top_k_spladev3=int(cfg.retrieval.get("top_k_spladev3", 50)),
-        top_k_colbert=int(cfg.retrieval.get("top_k_colbert", 50)),
+    if not SpladePPRetriever.index_ready(str(paths["spladepp_dir"])):
+        raise FileNotFoundError(f"SPLADE++ index not found/ready: {paths['spladepp_dir']}")
+    if not MedCPTRetriever.index_ready(str(paths["medcpt_dir"])):
+        raise FileNotFoundError(f"MedCPT index not found/ready: {paths['medcpt_dir']}")
+    spladepp = get_spladepp_retriever(dataset_key, cfg)
+    medcpt = get_medcpt_retriever(dataset_key, cfg)
+    return HybridSpladePPMedcptRetriever(
+        spladepp=spladepp,
+        medcpt=medcpt,
+        top_k_spladepp=int(cfg.retrieval.get("top_k_spladepp", 50)),
+        top_k_medcpt=int(cfg.retrieval.get("top_k_medcpt", 50)),
+    )
+
+
+def get_hybrid_bm25_medcpt_retriever(dataset_key: str, cfg) -> DualHybridRetriever:
+    """Create hybrid retriever (BM25 + MedCPT)."""
+    paths = _index_paths(dataset_key)
+    if not (paths["bm25_dir"] / "index.pkl").exists():
+        raise FileNotFoundError(f"BM25 index not found: {paths['bm25_dir']}")
+    if not MedCPTRetriever.index_ready(str(paths["medcpt_dir"])):
+        raise FileNotFoundError(f"MedCPT index not found/ready: {paths['medcpt_dir']}")
+    bm25 = get_bm25_retriever(dataset_key, cfg)
+    medcpt = get_medcpt_retriever(dataset_key, cfg)
+    return HybridBm25MedcptRetriever(
+        bm25=bm25,
+        medcpt=medcpt,
+        top_k_bm25=int(cfg.retrieval.top_k_bm25),
+        top_k_medcpt=int(cfg.retrieval.get("top_k_medcpt", 50)),
+    )
+
+
+def get_hybrid_spladepp_faiss_retriever(dataset_key: str, cfg) -> DualHybridRetriever:
+    """Create hybrid retriever (SPLADE++ + FAISS)."""
+    paths = _index_paths(dataset_key)
+    if not SpladePPRetriever.index_ready(str(paths["spladepp_dir"])):
+        raise FileNotFoundError(f"SPLADE++ index not found/ready: {paths['spladepp_dir']}")
+    if not paths["faiss_path"].exists():
+        raise FileNotFoundError(f"FAISS index not found: {paths['faiss_path']}")
+    spladepp = get_spladepp_retriever(dataset_key, cfg)
+    dense = get_faiss_retriever(dataset_key, cfg)
+    return HybridSpladePPFaissRetriever(
+        spladepp=spladepp,
+        dense=dense,
+        top_k_spladepp=int(cfg.retrieval.get("top_k_spladepp", 50)),
+        top_k_dense=int(
+            cfg.retrieval.get("top_k_faiss", cfg.retrieval.get("top_k_dense", 50))
+        ),
     )
 
 
@@ -334,14 +409,18 @@ def get_retriever(dataset_key: str, cfg, retriever_type: str = "hybrid_bm25_fais
         return get_bm25_retriever(dataset_key, cfg)
     elif retriever_type == "faiss":
         return get_faiss_retriever(dataset_key, cfg)
-    elif retriever_type == "spladev3":
-        return get_spladev3_retriever(dataset_key, cfg)
-    elif retriever_type == "colbert":
-        return get_colbert_retriever(dataset_key, cfg)
+    elif retriever_type == "spladepp":
+        return get_spladepp_retriever(dataset_key, cfg)
+    elif retriever_type == "medcpt":
+        return get_medcpt_retriever(dataset_key, cfg)
     elif retriever_type == "hybrid_bm25_faiss":
         return get_hybrid_retriever(dataset_key, cfg)
-    elif retriever_type == "hybrid_spladev3_colbert":
-        return get_hybrid_spladev3_colbert_retriever(dataset_key, cfg)
+    elif retriever_type == "hybrid_bm25_medcpt":
+        return get_hybrid_bm25_medcpt_retriever(dataset_key, cfg)
+    elif retriever_type == "hybrid_spladepp_faiss":
+        return get_hybrid_spladepp_faiss_retriever(dataset_key, cfg)
+    elif retriever_type == "hybrid_spladepp_medcpt":
+        return get_hybrid_spladepp_medcpt_retriever(dataset_key, cfg)
     else:
         raise ValueError(f"Unknown retriever type: {retriever_type}")
 
@@ -392,6 +471,7 @@ def process_queries(
     exact_distance_features: bool = False,
     kg_max_path: int = 4,
     kg_refine_top_n: int = 0,
+    passage_entity_cache_max: Optional[int] = 150_000,
 ) -> None:
     """Process queries and generate ranking data."""
     pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -408,7 +488,12 @@ def process_queries(
     skipped_no_gold = 0
     no_positive_in_pool = 0
     qtype_counter = Counter()
-    passage_entity_cache: Dict[str, List] = {}
+    passage_entity_cache: OrderedDict = OrderedDict()
+    pec_max = (
+        None
+        if passage_entity_cache_max is None or int(passage_entity_cache_max) <= 0
+        else int(passage_entity_cache_max)
+    )
     # Quick scale diagnostics to detect feature dominance / collapse.
     kg_l1_sum = 0.0
     kg_feat_abs_sum = np.zeros(6, dtype=np.float64)
@@ -444,7 +529,7 @@ def process_queries(
             # Compute query bundle
             qb = compute_query_bundle(question, qtype, encoder, linker)
             q_emb = qb["query_emb"]
-            if qid not in qid_emb_cache:
+            if query_cache_out_path and qid not in qid_emb_cache:
                 qid_emb_cache[str(qid)] = q_emb.tolist()
             if expected_query_feat_dim is not None and int(q_emb.shape[0]) != int(expected_query_feat_dim):
                 raise ValueError(
@@ -469,7 +554,9 @@ def process_queries(
                 int(kg_refine_top_n) > 0
                 and retriever_type in {
                     "hybrid_bm25_faiss",
-                    "hybrid_spladev3_colbert",
+                    "hybrid_bm25_medcpt",
+                    "hybrid_spladepp_faiss",
+                    "hybrid_spladepp_medcpt",
                 }
             )
             query_kg_cache_exact = None
@@ -482,32 +569,41 @@ def process_queries(
                     max_path=int(kg_max_path),
                 )
 
-            # Fast dense features from retriever scores (recommended for large full runs):
-            # avoids re-encoding up to 200 passage texts per query.
+            # Active dense score used by the dense branch. For FAISS hybrids it
+            # is the FAISS/PubMedBERT score; for MedCPT hybrids it is the
+            # MedCPT asymmetric query/article dot product. This keeps the dense
+            # branch aligned with the dense retriever in each hybrid family.
             use_dense_scores = dense_from_retriever_scores and retriever_type in {
                 "bm25",
-                "spladev3",
+                "spladepp",
                 "faiss",
-                "colbert",
+                "medcpt",
                 "hybrid_bm25_faiss",
-                "hybrid_spladev3_colbert",
+                "hybrid_bm25_medcpt",
+                "hybrid_spladepp_faiss",
+                "hybrid_spladepp_medcpt",
             }
+            active_dense_scores: List[float] = []
+            for cand in candidates:
+                if retriever_type == "bm25":
+                    active_dense_scores.append(float(cand.get("bm25_score", cand.get("score", 0.0))))
+                elif retriever_type == "spladepp":
+                    active_dense_scores.append(float(cand.get("spladepp_score", cand.get("score", 0.0))))
+                elif retriever_type in {"medcpt", "hybrid_spladepp_medcpt", "hybrid_bm25_medcpt"}:
+                    active_dense_scores.append(
+                        float(cand.get("medcpt_score", cand.get("dense_score", cand.get("score", 0.0))))
+                    )
+                else:
+                    active_dense_scores.append(float(cand.get("dense_score", cand.get("score", 0.0))))
+            dense_score_mean = float(np.mean(active_dense_scores))
+            dense_score_std = float(np.std(active_dense_scores) + 1e-8)
+
             p_embs = None
-            dense_scores_raw: List[float] = []
-            if use_dense_scores:
-                for cand in candidates:
-                    if retriever_type == "bm25":
-                        dense_scores_raw.append(float(cand.get("bm25_score", cand.get("score", 0.0))))
-                    elif retriever_type == "spladev3":
-                        dense_scores_raw.append(float(cand.get("spladev3_score", cand.get("score", 0.0))))
-                    elif retriever_type in {"colbert", "hybrid_spladev3_colbert"}:
-                        dense_scores_raw.append(float(cand.get("colbert_score", cand.get("dense_score", cand.get("score", 0.0)))))
-                    else:
-                        dense_scores_raw.append(float(cand.get("dense_score", cand.get("score", 0.0))))
-                cos_mean = float(np.mean(dense_scores_raw))
-                cos_std = float(np.std(dense_scores_raw) + 1e-8)
-            else:
+            if not use_dense_scores:
                 # Original dense feature path: encode passages with sentence encoder.
+                # The active dense retriever score remains feature [0]; the
+                # encoded passages supply mean/max |q-p| so the branch is still
+                # a full 4-dim dense semantic feature vector.
                 p_texts = [c.get("text", "") for c in candidates]
                 p_embs = encoder.encode(
                     p_texts,
@@ -516,9 +612,6 @@ def process_queries(
                     show_progress_bar=False,
                     convert_to_numpy=True,
                 )
-                cosines = batch_cosines(q_emb, p_embs)
-                cos_mean = float(np.mean(cosines))
-                cos_std = float(np.std(cosines) + 1e-8)
 
             # Process each candidate
             has_positive_in_pool = any(c["id"] in gold_ids for c in candidates)
@@ -531,33 +624,47 @@ def process_queries(
                 # Extract scores based on retriever type
                 bm25_score = 0.0
                 dense_score = 0.0
-                spladev3_score = 0.0
+                spladepp_score = 0.0
                 
                 if retriever_type == "bm25":
                     bm25_score = float(cand.get("score", cand.get("bm25_score", 0.0)))
                 elif retriever_type == "faiss":
                     dense_score = float(cand.get("score", cand.get("dense_score", 0.0)))
-                elif retriever_type == "colbert":
-                    dense_score = float(cand.get("score", cand.get("colbert_score", 0.0)))
+                elif retriever_type == "medcpt":
+                    dense_score = float(cand.get("score", cand.get("medcpt_score", 0.0)))
                 elif retriever_type == "hybrid_bm25_faiss":
                     bm25_score = float(cand.get("bm25_score", 0.0))
                     dense_score = float(cand.get("dense_score", 0.0))
-                elif retriever_type == "hybrid_spladev3_colbert":
-                    spladev3_score = float(cand.get("spladev3_score", 0.0))
-                    dense_score = float(cand.get("colbert_score", 0.0))
-                elif retriever_type == "spladev3":
-                    spladev3_score = float(cand.get("score", cand.get("spladev3_score", 0.0)))
+                elif retriever_type == "hybrid_bm25_medcpt":
+                    bm25_score = float(cand.get("bm25_score", 0.0))
+                    dense_score = float(cand.get("medcpt_score", 0.0))
+                elif retriever_type == "hybrid_spladepp_faiss":
+                    spladepp_score = float(cand.get("spladepp_score", 0.0))
+                    dense_score = float(cand.get("dense_score", 0.0))
+                elif retriever_type == "hybrid_spladepp_medcpt":
+                    spladepp_score = float(cand.get("spladepp_score", 0.0))
+                    dense_score = float(cand.get("medcpt_score", 0.0))
+                elif retriever_type == "spladepp":
+                    spladepp_score = float(cand.get("score", cand.get("spladepp_score", 0.0)))
                 
-                # Get or compute passage entities
-                if pid not in passage_entity_cache:
-                    passage_entity_cache[pid] = linker.link(p_text)
-                p_entities = passage_entity_cache[pid]
+                # Get or compute passage entities (bounded LRU to cap RAM on long runs)
+                if pid in passage_entity_cache:
+                    _lru_touch(passage_entity_cache, pid, pec_max)
+                    p_entities = passage_entity_cache[pid]
+                else:
+                    _lru_put(
+                        passage_entity_cache,
+                        pid,
+                        linker.link(p_text),
+                        pec_max,
+                    )
+                    p_entities = passage_entity_cache[pid]
 
                 # Compute features (use appropriate scores)
                 sparse_signal_score = (
                     bm25_score
-                    if retriever_type in ("bm25", "hybrid_bm25_faiss")
-                    else spladev3_score
+                    if retriever_type in ("bm25", "hybrid_bm25_faiss", "hybrid_bm25_medcpt")
+                    else spladepp_score
                 )
                 sparse_feats = compute_sparse_features(
                     query=question,
@@ -569,20 +676,16 @@ def process_queries(
                 if use_dense_scores:
                     # [score, 0, 0, z(score)] keeps expected 4-dim shape with
                     # retriever-consistent signal at a fraction of the runtime.
-                    if retriever_type == "bm25":
-                        ds = bm25_score
-                    elif retriever_type == "spladev3":
-                        ds = spladev3_score
-                    else:
-                        ds = dense_score
-                    z = (ds - cos_mean) / (cos_std + 1e-8)
+                    ds = active_dense_scores[i]
+                    z = (ds - dense_score_mean) / (dense_score_std + 1e-8)
                     dense_feats = [float(ds), 0.0, 0.0, float(z)]
                 else:
-                    dense_feats = compute_dense_features(
+                    dense_feats = compute_dense_features_with_score(
                         q_emb=q_emb,
                         p_emb=p_embs[i],
-                        cosine_mean=cos_mean,
-                        cosine_std=cos_std,
+                        dense_score=active_dense_scores[i],
+                        score_mean=dense_score_mean,
+                        score_std=dense_score_std,
                     ).tolist()
 
                 use_exact_for_candidate = bool(exact_distance_features) or (
@@ -630,17 +733,27 @@ def process_queries(
                 }
                 # Store only score channels relevant to current retriever.
                 # Avoid writing constant zero score columns across massive files.
-                if retriever_type in ("bm25", "hybrid_bm25_faiss"):
+                if retriever_type in (
+                    "bm25",
+                    "hybrid_bm25_faiss",
+                    "hybrid_bm25_medcpt",
+                ):
                     rec["bm25_score"] = bm25_score
                 if retriever_type in (
                     "faiss",
                     "hybrid_bm25_faiss",
-                    "colbert",
-                    "hybrid_spladev3_colbert",
+                    "hybrid_spladepp_faiss",
+                    "medcpt",
+                    "hybrid_bm25_medcpt",
+                    "hybrid_spladepp_medcpt",
                 ):
                     rec["dense_score"] = dense_score
-                if retriever_type in ("spladev3", "hybrid_spladev3_colbert"):
-                    rec["spladev3_score"] = spladev3_score
+                if retriever_type in (
+                    "spladepp",
+                    "hybrid_spladepp_faiss",
+                    "hybrid_spladepp_medcpt",
+                ):
+                    rec["spladepp_score"] = spladepp_score
                 _ = lean_records  # kept for CLI compatibility
 
                 fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -696,10 +809,12 @@ def main():
         choices=[
             "bm25",
             "faiss",
-            "spladev3",
-            "colbert",
+            "spladepp",
+            "medcpt",
             "hybrid_bm25_faiss",
-            "hybrid_spladev3_colbert",
+            "hybrid_bm25_medcpt",
+            "hybrid_spladepp_faiss",
+            "hybrid_spladepp_medcpt",
             # backward-compatible aliases
             "hybrid",
             "hybrid_neural",
@@ -707,8 +822,9 @@ def main():
         ],
         default="all",
         help=(
-            "Retriever type: bm25, faiss, spladev3, colbert, "
-            "hybrid_bm25_faiss, hybrid_spladev3_colbert, or all. "
+            "Retriever type: bm25, faiss, spladepp, medcpt, "
+            "hybrid_bm25_faiss, hybrid_bm25_medcpt, hybrid_spladepp_faiss, "
+            "hybrid_spladepp_medcpt, or all (iterates the 4 hybrid families). "
             "Aliases accepted: hybrid, hybrid_neural."
         )
     )
@@ -765,13 +881,33 @@ def main():
         ),
     )
     parser.add_argument(
+        "--exact-kg-distances",
+        action="store_true",
+        help="Force exact KG shortest-path distance features for this run.",
+    )
+    parser.add_argument(
+        "--no-exact-kg-distances",
+        action="store_true",
+        help="Disable exact KG shortest-path distance features for this run.",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         choices=["auto", "cuda", "cpu"],
         default="auto",
         help="Device for encoder/retriever components. Default auto.",
     )
-    
+    parser.add_argument(
+        "--passage-entity-cache-max",
+        type=int,
+        default=150_000,
+        help=(
+            "Max unique passage IDs to retain for entity-linking cache (LRU). "
+            "Reduces RAM on large runs; evicted passages are re-linked if seen again. "
+            "Use 0 for unlimited (previous behavior)."
+        ),
+    )
+
     args = parser.parse_args()
     
     cfg = OmegaConf.load("configs/base.yaml")
@@ -817,15 +953,27 @@ def main():
     expected_query_feat_dim = encoder_query_feat_dim
 
     max_candidates = int(cfg.retrieval.candidate_pool_size)
+    exact_kg_distances = bool(getattr(cfg.kg, "exact_distance_features", False))
+    if args.exact_kg_distances and args.no_exact_kg_distances:
+        raise ValueError("Use only one of --exact-kg-distances / --no-exact-kg-distances.")
+    if args.exact_kg_distances:
+        exact_kg_distances = True
+    if args.no_exact_kg_distances:
+        exact_kg_distances = False
+    logger.info(f"Exact KG distance features: {exact_kg_distances}")
 
+    # ``--retriever all`` iterates the four hybrid families used in the paper:
+    #   (1) BM25 + FAISS              (classical sparse + neural dense)
+    #   (2) BM25 + MedCPT             (classical sparse + biomedical dense)
+    #   (3) SPLADE++ + FAISS          (learned sparse + neural dense)
+    #   (4) SPLADE++ + MedCPT         (learned sparse + biomedical dense)
+    # Single retrievers still work explicitly for ablations.
     retriever_types = (
         [
-            "bm25",
-            "faiss",
-            "spladev3",
-            "colbert",
             "hybrid_bm25_faiss",
-            "hybrid_spladev3_colbert",
+            "hybrid_bm25_medcpt",
+            "hybrid_spladepp_faiss",
+            "hybrid_spladepp_medcpt",
         ]
         if args.retriever == "all"
         else [normalize_retriever_name(args.retriever)]
@@ -901,9 +1049,10 @@ def main():
                                 else query_cache_file(retriever_type, dataset_name, split)
                             ),
                             dense_from_retriever_scores=bool(args.dense_from_retriever_scores),
-                            exact_distance_features=bool(getattr(cfg.kg, "exact_distance_features", False)),
+                            exact_distance_features=exact_kg_distances,
                             kg_max_path=int(getattr(cfg.kg, "max_path_length", 4)),
                             kg_refine_top_n=kg_refine_top_n,
+                            passage_entity_cache_max=int(args.passage_entity_cache_max),
                         )
                         if not args.no_write_query_cache:
                             cp = query_cache_file(retriever_type, dataset_name, split)
@@ -987,9 +1136,10 @@ def main():
                                 else query_cache_file(retriever_type, dataset_name, split)
                             ),
                             dense_from_retriever_scores=bool(args.dense_from_retriever_scores),
-                            exact_distance_features=bool(getattr(cfg.kg, "exact_distance_features", False)),
+                            exact_distance_features=exact_kg_distances,
                             kg_max_path=int(getattr(cfg.kg, "max_path_length", 4)),
                             kg_refine_top_n=kg_refine_top_n,
+                            passage_entity_cache_max=int(args.passage_entity_cache_max),
                         )
                         if not args.no_write_query_cache:
                             cp = query_cache_file(retriever_type, dataset_name, split)

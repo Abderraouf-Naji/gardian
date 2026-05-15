@@ -2,7 +2,8 @@
 Generate ranking training data (JSONL) for GARDIAN.
 
 For each training query:
-  1. Run hybrid retrieval → candidate pool (≤400)
+  1. Run hybrid retrieval → candidate pool (bounded by ``max_candidates``, usually
+     from ``cfg.retrieval.candidate_pool_size``, e.g. 100).
   2. Compute sparse / dense / KG features for every candidate
   3. Label each candidate 1 (positive) if its id is in gold_passage_ids,
      else 0 (negative). If no gold found, fall back to BM25-top-1 as pseudo-positive.
@@ -29,7 +30,7 @@ def generate_rank_data(queries: List[Dict],
                        linker: EntityLinker,
                        kg,               # nx.DiGraph
                        out_path: str,
-                       max_candidates: int = 400):
+                       max_candidates: int = 100):
     """
     queries : list of {id, question, gold_passage_ids, question_type}
     Writes one JSONL per query-candidate pair.

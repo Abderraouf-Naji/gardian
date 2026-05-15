@@ -36,8 +36,11 @@ def parse_args():
     p.add_argument(
         "--max-concepts",
         type=int,
-        default=300_000,
-        help="Max CUIs to keep per KG variant (use 0 for unlimited).",
+        default=0,
+        help=(
+            "Max CUIs to keep per KG variant (default 0 = unlimited). "
+            "Set a positive value only for quick smoke-test builds."
+        ),
     )
     p.add_argument(
         "--out-prefix",

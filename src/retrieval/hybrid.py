@@ -9,8 +9,8 @@ class HybridRetriever:
     """
     Combine BM25 and Dense results into a candidate pool.
 
-    The paper uses the union of top-200 BM25 and top-200 Dense
-    results, deduplicated by passage id, giving ~300-400 candidates.
+    The current paper configuration uses the union of top-50 BM25 and top-50
+    dense results, deduplicated by passage id, giving up to ~100 candidates.
     """
 
     def __init__(self, bm25: BM25Retriever, dense: DenseRetriever,
@@ -70,11 +70,14 @@ class HybridRetriever:
 
 class DualHybridRetriever:
     """
-    Generic two-retriever union with score preservation.
+    Generic two-retriever union with score preservation, fused by Reciprocal
+    Rank Fusion (RRF, k=60).
 
-    Useful for:
-      - BM25 + FAISS (lexical + dense)
-      - BioBERT + Doc2Query (neural + lexical expansion)
+    Used by all four hybrid families in the paper:
+      - BM25 + FAISS                 (lexical + general dense)
+      - BM25 + MedCPT                (lexical + biomedical dense)
+      - SPLADE++ + FAISS             (learned-sparse + general dense)
+      - SPLADE++ + MedCPT            (learned-sparse + biomedical dense)
     """
 
     def __init__(
@@ -160,21 +163,77 @@ class HybridBm25FaissRetriever(DualHybridRetriever):
         )
 
 
-class HybridSpladev3ColbertRetriever(DualHybridRetriever):
-    """Union of SPLADEv3 + ColBERT retrievers."""
+class HybridSpladePPMedcptRetriever(DualHybridRetriever):
+    """
+    Union of SPLADE++ (learned-sparse, vocabulary space) and MedCPT (dense
+    biomedical, single-vector). This is the canonical "sparse + dense neural
+    hybrid" pairing for biomedical retrieval.
+    """
 
     def __init__(
         self,
-        spladev3,
-        colbert,
-        top_k_spladev3: int = 50,
-        top_k_colbert: int = 50,
+        spladepp,
+        medcpt,
+        top_k_spladepp: int = 50,
+        top_k_medcpt: int = 50,
     ):
         super().__init__(
-            first=spladev3,
-            second=colbert,
-            first_score_key="spladev3_score",
-            second_score_key="colbert_score",
-            top_k_first=top_k_spladev3,
-            top_k_second=top_k_colbert,
+            first=spladepp,
+            second=medcpt,
+            first_score_key="spladepp_score",
+            second_score_key="medcpt_score",
+            top_k_first=top_k_spladepp,
+            top_k_second=top_k_medcpt,
+        )
+
+
+class HybridBm25MedcptRetriever(DualHybridRetriever):
+    """
+    Union of BM25 (lexical) + MedCPT (biomedical dense, asymmetric Q/A
+    encoders). Cross-family hybrid that pairs the strongest classical sparse
+    baseline with a domain-tuned dense retriever.
+    """
+
+    def __init__(
+        self,
+        bm25: BM25Retriever,
+        medcpt,
+        top_k_bm25: int = 50,
+        top_k_medcpt: int = 50,
+    ):
+        super().__init__(
+            first=bm25,
+            second=medcpt,
+            first_score_key="bm25_score",
+            second_score_key="medcpt_score",
+            top_k_first=top_k_bm25,
+            top_k_second=top_k_medcpt,
+        )
+
+
+class HybridSpladePPFaissRetriever(DualHybridRetriever):
+    """
+    Union of SPLADE++ (learned-sparse, vocabulary space) + FAISS dense
+    (general-purpose biomedical embedding). Cross-family hybrid that contrasts
+    a learned-sparse lexical signal with a general single-vector dense signal.
+
+    The FAISS side is stored under the conventional ``dense_score`` field
+    (matching ``HybridBm25FaissRetriever``); the active dense backend is
+    inferred from ``retriever_type`` in the rank-data record.
+    """
+
+    def __init__(
+        self,
+        spladepp,
+        dense: DenseRetriever,
+        top_k_spladepp: int = 50,
+        top_k_dense: int = 50,
+    ):
+        super().__init__(
+            first=spladepp,
+            second=dense,
+            first_score_key="spladepp_score",
+            second_score_key="dense_score",
+            top_k_first=top_k_spladepp,
+            top_k_second=top_k_dense,
         )

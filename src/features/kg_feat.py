@@ -80,6 +80,7 @@ def build_query_kg_cache(
         "q_set": q_set,
         "q_nodes_in_G": q_nodes_in_G,
         "dist_map": dist_map,
+        "distances_computed": bool(compute_distances),
     }
 
 
@@ -145,12 +146,15 @@ def compute_kg_features(
     g_nodes = node_set if node_set is not None else frozenset(G.nodes)
     p_nodes_in_G = list(p_set & g_nodes)
     dist_map = query_cache.get("dist_map") if query_cache is not None else None
-    if dist_map is not None and p_nodes_in_G:
+    distances_computed = bool(query_cache.get("distances_computed", False)) if query_cache else False
+    if distances_computed and dist_map is not None and p_nodes_in_G:
         p_dists = [float(dist_map.get(n, max_path)) for n in p_nodes_in_G]
         avg_dist = float(np.mean(p_dists)) if p_dists else float(max_path)
         min_dist = float(np.min(p_dists)) if p_dists else float(max_path)
     else:
-        # Fallback behavior (kept for backward compatibility / tests):
+        # Fallback behavior when exact BFS is disabled:
+        # shared linked entities are a zero-hop KG match; otherwise distance is
+        # treated as unknown/far. This preserves a useful KG signal in fast runs.
         if shared:
             avg_dist = 0.0
             min_dist = 0.0

@@ -24,21 +24,29 @@ from src.common.rank_data_paths import (
     resolve_rank_data_file,
 )
 from src.common.repro import set_global_seed
-from src.model.gardian import GARDIAN
+from src.model.gardian import build_gardian_from_model_cfg
 from src.training.trainer import GARDIANTrainer
 
 HYBRID_RETRIEVER_COMBINATIONS = {
     "hybrid_bm25_faiss": "BM25 + FAISS",
-    "hybrid_spladev3_colbert": "SPLADEv3 + ColBERT",
+    "hybrid_bm25_medcpt": "BM25 + MedCPT",
+    "hybrid_spladepp_faiss": "SPLADE++ + FAISS",
+    "hybrid_spladepp_medcpt": "SPLADE++ + MedCPT",
 }
 
+# GARDIAN is trained per hybrid family (one checkpoint per row in the
+# 4-cell hybrid table). Single-retriever names are kept here only so that
+# legacy CLI calls continue to work for ablation runs over already-existing
+# rank-data; they are NOT iterated when ``--retriever all`` is used.
 ALL_TRAIN_RETRIEVERS = [
     "hybrid_bm25_faiss",
-    "hybrid_spladev3_colbert",
-    "spladev3",
+    "hybrid_bm25_medcpt",
+    "hybrid_spladepp_faiss",
+    "hybrid_spladepp_medcpt",
+    "spladepp",
     "bm25",
     "faiss",
-    "colbert",
+    "medcpt",
 ]
 
 
@@ -177,9 +185,12 @@ def main():
         default="all",
         help=(
             "Retriever rank-data family to train on. "
-            "Hybrid combos: "
+            "Hybrid combos used in our experiments: "
             "hybrid_bm25_faiss(BM25+FAISS), "
-            "hybrid_spladev3_colbert(SPLADEv3+ColBERT)."
+            "hybrid_bm25_medcpt(BM25+MedCPT), "
+            "hybrid_spladepp_faiss(SPLADE++ + FAISS), "
+            "hybrid_spladepp_medcpt(SPLADE++ + MedCPT). "
+            "Use 'all' to train one GARDIAN per hybrid family (4 checkpoints)."
         ),
     )
     parser.add_argument(
@@ -204,6 +215,24 @@ def main():
         default=None,
         help="Optional override for training.epochs from configs/base.yaml (e.g., 20).",
     )
+    parser.add_argument(
+        "--branch-hidden",
+        type=int,
+        default=None,
+        help="Optional override for model.branch_hidden.",
+    )
+    parser.add_argument(
+        "--controller-hidden",
+        type=int,
+        default=None,
+        help="Optional override for model.controller_hidden.",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=None,
+        help="Optional override for model.dropout.",
+    )
     args = parser.parse_args()
 
     cfg = OmegaConf.load("configs/base.yaml")
@@ -213,6 +242,21 @@ def main():
             raise ValueError("--epochs must be > 0")
         cfg.training.epochs = int(args.epochs)
         logger.info(f"Overriding cfg.training.epochs -> {cfg.training.epochs}")
+    if args.branch_hidden is not None:
+        if int(args.branch_hidden) <= 0:
+            raise ValueError("--branch-hidden must be > 0")
+        cfg.model.branch_hidden = int(args.branch_hidden)
+        logger.info(f"Overriding cfg.model.branch_hidden -> {cfg.model.branch_hidden}")
+    if args.controller_hidden is not None:
+        if int(args.controller_hidden) <= 0:
+            raise ValueError("--controller-hidden must be > 0")
+        cfg.model.controller_hidden = int(args.controller_hidden)
+        logger.info(f"Overriding cfg.model.controller_hidden -> {cfg.model.controller_hidden}")
+    if args.dropout is not None:
+        if not (0.0 <= float(args.dropout) < 1.0):
+            raise ValueError("--dropout must be in [0, 1)")
+        cfg.model.dropout = float(args.dropout)
+        logger.info(f"Overriding cfg.model.dropout -> {cfg.model.dropout}")
     cudnn_det = bool(getattr(cfg.training, "cudnn_deterministic", False))
     set_global_seed(int(cfg.seed), cudnn_deterministic=cudnn_det)
 
@@ -224,8 +268,17 @@ def main():
         device = "cpu"
         logger.warning("Training on: cpu — CUDA not detected.")
 
+    # ``--retriever all`` trains GARDIAN once per hybrid family.
+    # The four single retrievers (bm25, faiss, spladepp, medcpt) still work
+    # when named explicitly for ablation runs.
+    FOCUS_HYBRIDS = [
+        "hybrid_bm25_faiss",
+        "hybrid_bm25_medcpt",
+        "hybrid_spladepp_faiss",
+        "hybrid_spladepp_medcpt",
+    ]
     retrievers = (
-        ALL_TRAIN_RETRIEVERS
+        FOCUS_HYBRIDS
         if args.retriever == "all"
         else [normalize_retriever_name(args.retriever)]
     )
@@ -233,9 +286,9 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     summary = {}
 
-    logger.info("Hybrid retriever combinations (explicit):")
-    for name, combo in HYBRID_RETRIEVER_COMBINATIONS.items():
-        logger.info(f"  - {name}: {combo}")
+    logger.info("Hybrid retriever combinations:")
+    for name in FOCUS_HYBRIDS:
+        logger.info(f"  - {name}: {HYBRID_RETRIEVER_COMBINATIONS[name]}")
 
     for retriever in retrievers:
         logger.info("=" * 72)
@@ -269,16 +322,7 @@ def main():
             continue
         logger.info(f"train={train_lines:,} lines | dev={dev_lines:,} lines")
 
-        model = GARDIAN(
-            sparse_dim=int(cfg.model.sparse_feat_dim),
-            dense_dim=int(cfg.model.dense_feat_dim),
-            kg_dim=int(cfg.model.kg_feat_dim),
-            branch_hidden=int(cfg.model.branch_hidden),
-            controller_hidden=int(cfg.model.controller_hidden),
-            query_feat_dim=int(cfg.model.query_feat_dim),
-            n_qtypes=len(cfg.model.question_types),
-            dropout=float(cfg.model.dropout),
-        )
+        model = build_gardian_from_model_cfg(cfg.model)
 
         logger.info(
             "GARDIAN hparams from configs/base.yaml | "
@@ -294,7 +338,9 @@ def main():
         logger.info(
             f"Training | epochs={cfg.training.epochs} lr={cfg.training.lr} "
             f"wd={cfg.training.weight_decay} batch={cfg.training.batch_size} "
-            f"num_negatives={cfg.training.num_negatives}"
+            f"num_negatives={cfg.training.num_negatives} margin={cfg.training.margin} "
+            f"hard_negative_top_n={getattr(cfg.training, 'hard_negative_top_n', None)} "
+            f"hard_negative_fraction={getattr(cfg.training, 'hard_negative_fraction', 0.0)}"
         )
 
         # ── Train ────────────────────────────────────────────────────────────

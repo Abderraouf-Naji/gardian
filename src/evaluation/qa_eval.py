@@ -9,9 +9,15 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 from loguru import logger
+from tqdm import tqdm
 
+from src.common.question_types import normalize_question_type, qtype_onehot
+from src.features.dense_feat import compute_dense_features_with_score
+from src.features.kg_feat import build_degree_lookup, build_node_set, build_query_kg_cache, compute_kg_features
+from src.features.sparse import compute_sparse_features
 from src.pipeline.rag_reader import (
     format_reader_context,
+    retrieve_hybrid_candidates,
     run_reader_llm_only_block,
     run_reader_rag_block,
 )
@@ -27,6 +33,37 @@ def extract_citations(answer_text: str) -> List[str]:
     return re.findall(r"\[P(\d+)\]", answer_text)
 
 
+def _looks_like_mcq(item: Dict[str, Any]) -> bool:
+    """True when the row carries explicit answer options."""
+    opts = item.get("options")
+    if isinstance(opts, dict) and any(str(v).strip() for v in opts.values()):
+        return True
+    if isinstance(opts, list) and any(str(v).strip() for v in opts):
+        return True
+    if str(item.get("answer_letter") or "").strip():
+        return True
+    return str(item.get("dataset") or "").strip().lower() in {"medmcqa", "medqa"}
+
+
+def _format_options_block(options: Any) -> List[str]:
+    """Return stable A./B./C. option lines for dict or list option payloads."""
+    if isinstance(options, dict):
+        keys = sorted(options.keys(), key=lambda x: str(x).strip().upper())
+        out = []
+        for key in keys:
+            text = options.get(key)
+            if text is not None and str(text).strip():
+                out.append(f"  {str(key).strip().upper()}. {str(text).strip()}")
+        return out
+    if isinstance(options, list):
+        out = []
+        for idx, text in enumerate(options):
+            if text is not None and str(text).strip():
+                out.append(f"  {chr(ord('A') + idx)}. {str(text).strip()}")
+        return out
+    return []
+
+
 def format_qa_question_for_reader(item: Dict[str, Any]) -> str:
     """
     Build the question string shown to the reader.
@@ -35,23 +72,26 @@ def format_qa_question_for_reader(item: Dict[str, Any]) -> str:
     expanding A/B/C/D the model often answers ``I don't know``.
     """
     q = (item.get("question") or "").strip()
-    ds = str(item.get("dataset") or "")
-    opts = item.get("options")
-    if ds == "medmcqa" and isinstance(opts, dict) and opts:
-        letters = sorted(opts.keys(), key=lambda x: (len(str(x)), str(x)))
-        lines = [q, "", "Options:"]
-        for letter in letters:
-            opt_text = opts.get(letter)
-            if opt_text is not None:
-                lines.append(f"  {letter}. {opt_text}")
+    if _looks_like_mcq(item):
+        option_lines = _format_options_block(item.get("options"))
+        lines = ["Question type: multiple choice", q]
+        if option_lines:
+            lines.extend(["", "Options:", *option_lines])
+        lines.extend(["", "Choose one option letter and copy its text in the final answer line."])
         return "\n".join(lines)
+    qt = str(item.get("question_type") or "").strip().lower()
+    if qt == "yesno":
+        return (
+            "Question type: yes/no/maybe\n"
+            f"{q}\n\n"
+            "Answer with a final line exactly: Answer: yes, Answer: no, or Answer: maybe."
+        )
     return q
 
 
 def reader_task_for_item(item: Dict[str, Any]) -> str:
     """``yesno`` | ``mcq`` | ``open`` — selects reader prompt templates."""
-    ds = str(item.get("dataset") or "")
-    if ds == "medmcqa":
+    if _looks_like_mcq(item):
         return "mcq"
     qt = str(item.get("question_type") or "").strip().lower()
     if qt == "yesno":
@@ -67,6 +107,69 @@ def _passage_line_text(r: Dict[str, Any], lookup: Dict[str, str]) -> str:
     if isinstance(pid, str) and pid:
         return str(lookup.get(pid) or "")
     return ""
+
+
+def _resolve_sparse_score(rec: Dict[str, Any]) -> float:
+    """Sparse channel score for BM25 or SPLADE++ rank rows."""
+    if "bm25_score" in rec:
+        return float(rec.get("bm25_score", 0.0))
+    if "spladepp_score" in rec:
+        return float(rec.get("spladepp_score", 0.0))
+    sparse_feats = rec.get("sparse_feats") or [0.0]
+    return float(sparse_feats[0] if sparse_feats else 0.0)
+
+
+def _resolve_dense_score(rec: Dict[str, Any]) -> float:
+    """Dense channel score for FAISS or MedCPT rank rows."""
+    if "dense_score" in rec:
+        return float(rec.get("dense_score", 0.0))
+    if "medcpt_score" in rec:
+        return float(rec.get("medcpt_score", 0.0))
+    dense_feats = rec.get("dense_feats") or [0.0]
+    return float(dense_feats[0] if dense_feats else 0.0)
+
+
+def _rrf_fused_candidates(
+    candidates: List[Dict[str, Any]],
+    text_lookup: Dict[str, str],
+    *,
+    rrf_k: int = 60,
+) -> List[Tuple[float, Dict[str, Any]]]:
+    """Scale-free hybrid ranking from sparse and dense ranks."""
+    sparse_scores = [_resolve_sparse_score(r) for r in candidates]
+    dense_scores = [_resolve_dense_score(r) for r in candidates]
+    sparse_order = np.argsort(np.asarray(sparse_scores, dtype=np.float64))[::-1]
+    dense_order = np.argsort(np.asarray(dense_scores, dtype=np.float64))[::-1]
+    sparse_rank = {int(idx): rank + 1 for rank, idx in enumerate(sparse_order)}
+    dense_rank = {int(idx): rank + 1 for rank, idx in enumerate(dense_order)}
+
+    out: List[Tuple[float, Dict[str, Any]]] = []
+    for idx, r in enumerate(candidates):
+        score = (1.0 / (rrf_k + sparse_rank[idx])) + (1.0 / (rrf_k + dense_rank[idx]))
+        out.append(
+            (
+                float(score),
+                {
+                    "id": r["pid"],
+                    "text": _passage_line_text(r, text_lookup),
+                    "bm25_score": float(r.get("bm25_score", 0.0)),
+                    "spladepp_score": float(r.get("spladepp_score", 0.0)),
+                    "dense_score": _resolve_dense_score(r),
+                    "medcpt_score": float(r.get("medcpt_score", 0.0)),
+                    "hybrid_rrf_score": float(score),
+                },
+            )
+        )
+    # Match ``DualHybridRetriever`` tie-break: RRF, then sparse signal, then dense signal.
+    out.sort(
+        key=lambda t: (
+            t[0],
+            float(t[1].get("bm25_score", 0.0)) + float(t[1].get("spladepp_score", 0.0)),
+            float(t[1].get("dense_score", 0.0)) + float(t[1].get("medcpt_score", 0.0)),
+        ),
+        reverse=True,
+    )
+    return out
 
 
 # Lazy encoder only when a qid is missing from the precomputed pickle (e.g. eval-only splits).
@@ -195,6 +298,96 @@ def _bootstrap_ci(values: List[float], n_bootstrap: int = 2000, seed: int = 42) 
     return float(x.mean()), float(np.quantile(means, 0.025)), float(np.quantile(means, 0.975))
 
 
+def _bootstrap_ci_optional(
+    values: List[Optional[float]],
+    n_bootstrap: int = 2000,
+    seed: int = 42,
+) -> Optional[Tuple[float, float, float]]:
+    """Like :func:`_bootstrap_ci` but returns ``None`` when every value is N/A."""
+    present = [v for v in values if v is not None]
+    if not present:
+        return None
+    return _bootstrap_ci(present, n_bootstrap, seed)
+
+
+def _pack_ci(triple: Optional[Tuple[float, float, float]]) -> Optional[Dict[str, float]]:
+    """Expose bootstrap stats as ``{mean, ci95_low, ci95_high}`` plus legacy list."""
+    if triple is None:
+        return None
+    mean, lo, hi = triple
+    return {
+        "mean": float(mean),
+        "ci95_low": float(lo),
+        "ci95_high": float(hi),
+        "ci95": [float(mean), float(lo), float(hi)],
+    }
+
+
+def _citation_metrics_applicable(reader_task: str, dataset: str) -> bool:
+    """
+    Citation precision/recall are defined for PubMedQA-style evidence passages.
+
+    MedMCQA uses ``mcq_*_explanation`` gold ids that usually are not the passages
+  the model cites in ``[P#]`` slots (retrieved explanations from other items), so
+    citation scores are misleading — use ``answer_accuracy`` only.
+    """
+    rt = (reader_task or "open").strip().lower()
+    ds = (dataset or "").strip().lower()
+    if rt == "mcq" or ds in ("medmcqa", "medqa"):
+        return False
+    return ds in ("pubmedqa", "pubmedqa_labeled", "pubmedqa_artificial") or rt == "yesno"
+
+
+def _compute_citation_metrics(
+    cited_idxs: List[str],
+    passages: List[Dict],
+    gold_ids: List[str],
+    *,
+    reader_task: str,
+    dataset: str,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    if not _citation_metrics_applicable(reader_task, dataset):
+        return None, None, None
+    if not gold_ids:
+        return None, None, None
+    return (
+        _citation_precision(cited_idxs, passages, gold_ids),
+        _citation_recall(cited_idxs, passages, gold_ids),
+        _unsupported_claim_rate(cited_idxs, passages, gold_ids),
+    )
+
+
+def _aggregate_system_metrics(
+    rows: List[Dict[str, Any]],
+    *,
+    bootstrap_samples: int,
+    bootstrap_seed: int,
+) -> Dict[str, Any]:
+    """Per-system aggregate with explicit bootstrap CI fields."""
+    acc_ci = _bootstrap_ci([r["accuracy"] for r in rows], bootstrap_samples, bootstrap_seed)
+    cit_p_ci = _bootstrap_ci_optional(
+        [r.get("citation_precision") for r in rows], bootstrap_samples, bootstrap_seed
+    )
+    cit_r_ci = _bootstrap_ci_optional(
+        [r.get("citation_recall") for r in rows], bootstrap_samples, bootstrap_seed
+    )
+    uns_ci = _bootstrap_ci_optional(
+        [r.get("unsupported_claim_rate") for r in rows], bootstrap_samples, bootstrap_seed
+    )
+    out: Dict[str, Any] = {
+        "n_questions": len(rows),
+        "answer_accuracy": list(acc_ci),
+        "answer_accuracy_ci": _pack_ci(acc_ci),
+        "citation_precision": list(cit_p_ci) if cit_p_ci else None,
+        "citation_precision_ci": _pack_ci(cit_p_ci),
+        "citation_recall": list(cit_r_ci) if cit_r_ci else None,
+        "citation_recall_ci": _pack_ci(cit_r_ci),
+        "unsupported_claim_rate": list(uns_ci) if uns_ci else None,
+        "unsupported_claim_rate_ci": _pack_ci(uns_ci),
+    }
+    return out
+
+
 def _citation_recall(cited_idxs: List[str], passages: List[Dict], gold_ids: List[str]) -> float:
     gold_set = set(gold_ids)
     if not gold_set:
@@ -231,6 +424,329 @@ def _unsupported_claim_rate(cited_idxs: List[str], passages: List[Dict], gold_id
         except ValueError:
             unsupported += 1
     return unsupported / max(1, len(cited_idxs))
+
+
+def _enrich_live_candidates_for_gardian(
+    *,
+    question: str,
+    candidates: List[Dict[str, Any]],
+    qtype: str,
+    cfg: Any,
+    device: str,
+    encoder,
+    feature_cache,
+    kg,
+    linker,
+    degree_lookup,
+    node_set,
+) -> Tuple[List[float], List[float], float]:
+    """Attach branch feature vectors; return (qtype_onehot, query_emb, kg_coverage)."""
+    qtype_oh = qtype_onehot(normalize_question_type(qtype))
+    q_emb = encoder.encode(
+        [question],
+        normalize_embeddings=True,
+        show_progress_bar=False,
+        convert_to_numpy=True,
+    )[0]
+    p_embs = feature_cache.get_passage_embeddings(candidates)
+    dense_scores = [
+        float(c.get("medcpt_score", c.get("dense_score", c.get("score", 0.0))))
+        for c in candidates
+    ]
+    dense_mean = float(np.mean(dense_scores))
+    dense_std = float(np.std(dense_scores) + 1e-8)
+    q_entities = linker.link(question)
+    kg_coverage = 1.0 if q_entities else 0.0
+    query_kg_cache = build_query_kg_cache(
+        q_entities,
+        kg,
+        node_set=node_set,
+        compute_distances=bool(getattr(cfg.kg, "exact_distance_features", False)),
+        max_path=int(getattr(cfg.kg, "max_path_length", 4)),
+    )
+    for i, cand in enumerate(candidates):
+        p_entities = feature_cache.get_passage_entities(cand)
+        cand["sparse_feats"] = compute_sparse_features(
+            query=question,
+            passage=cand.get("text", ""),
+            bm25_score=float(cand.get("bm25_score", cand.get("spladepp_score", 0.0))),
+            idf_table=None,
+        ).tolist()
+        cand["dense_feats"] = compute_dense_features_with_score(
+            q_emb=q_emb,
+            p_emb=p_embs[i],
+            dense_score=dense_scores[i],
+            score_mean=dense_mean,
+            score_std=dense_std,
+        ).tolist()
+        cand["kg_feats"] = compute_kg_features(
+            q_entities=q_entities,
+            p_entities=p_entities,
+            G=kg,
+            max_path=int(getattr(cfg.kg, "max_path_length", 4)),
+            query_cache=query_kg_cache,
+            degree_lookup=degree_lookup,
+            node_set=node_set,
+        ).tolist()
+    return qtype_oh, q_emb.tolist(), kg_coverage
+
+
+def _live_passage_sort_key(pair: Tuple[float, Dict[str, Any]]) -> Tuple[float, float, float]:
+    score, d = pair
+    sp = float(d.get("bm25_score", 0.0)) + float(d.get("spladepp_score", 0.0))
+    den = float(d.get("dense_score", 0.0)) + float(d.get("medcpt_score", 0.0))
+    return (score, sp, den)
+
+
+def evaluate_qa_live(
+    questions: List[Dict[str, Any]],
+    *,
+    systems: List[str],
+    cfg: Any,
+    device: str,
+    retriever: Any,
+    gardian_model: Optional[torch.nn.Module],
+    tokenizer,
+    reader_model,
+    encoder,
+    feature_cache,
+    kg,
+    linker,
+    degree_lookup,
+    node_set,
+    bootstrap_samples: int = 2000,
+    bootstrap_seed: int = 42,
+    top_candidates: Optional[int] = None,
+) -> Tuple[Dict[str, Any], Dict[str, List[Dict[str, Any]]]]:
+    """
+    QA eval with live hybrid retrieval (unified BM25 + FAISS) → GARDIAN rerank → RAG reader.
+
+    Matches ``scripts/11_run_gardian_server.py``: retrieve, fuse features, ``gardian.rerank``,
+    then ``run_reader_rag_block`` on the top-k GARDIAN-ordered passages (hybrid baseline uses
+    RRF order from the retriever).
+    """
+    if "doc2query" in systems:
+        logger.warning("doc2query is not supported with live retrieval; skipping that system.")
+        systems = [s for s in systems if s != "doc2query"]
+
+    pool_k = int(top_candidates or getattr(cfg.retrieval, "candidate_pool_size", 100))
+    top_k_reader = int(cfg.qa.top_k_passages)
+    reader_max_input = int(cfg.qa.get("reader_max_input_length", 2048) or 2048)
+    passage_max_chars = int(cfg.qa.get("max_chars_per_passage", 600) or 600)
+    needs_rank = any(s in systems for s in ("bm25", "dense", "hybrid", "gardian"))
+
+    per_system_rows: Dict[str, List[Dict[str, Any]]] = {s: [] for s in systems}
+    dataset_names = sorted({str(q.get("dataset") or "dataset") for q in questions})
+    progress_desc = (
+        f"QA live {dataset_names[0]}"
+        if len(dataset_names) == 1
+        else f"QA live {len(dataset_names)} datasets"
+    )
+
+    for item in tqdm(questions, desc=progress_desc, unit="question"):
+        qid = item.get("id")
+        gold_answer = item.get("answer", "")
+        gold_ids = item.get("gold_passage_ids", [])
+        dataset = item.get("dataset", "")
+        q_reader = format_qa_question_for_reader(item)
+        r_task = reader_task_for_item(item)
+        qtype = str(item.get("question_type") or "other")
+
+        if "llm_only" in systems:
+            answer = run_reader_llm_only_block(
+                question=q_reader,
+                tokenizer=tokenizer,
+                reader_model=reader_model,
+                device=device,
+                max_new_tokens=int(cfg.qa.max_new_tokens),
+                max_input_length=reader_max_input,
+                question_type=item.get("question_type"),
+                reader_task=r_task,
+            )
+            per_system_rows["llm_only"].append(
+                {
+                    "qid": qid,
+                    "system": "llm_only",
+                    "answer": answer,
+                    "accuracy": _check_accuracy(
+                        answer,
+                        gold_answer,
+                        dataset,
+                        gold_letter=item.get("answer_letter"),
+                    ),
+                    "citation_precision": None,
+                    "citation_recall": None,
+                    "unsupported_claim_rate": None,
+                }
+            )
+
+        if not needs_rank:
+            continue
+
+        candidates = retrieve_hybrid_candidates(
+            (item.get("question") or "").strip(),
+            retriever,
+            top_k=pool_k,
+        )
+        if not candidates:
+            continue
+
+        gardian_ranked: List[Dict[str, Any]] = []
+        alpha_triplet = None
+        if "gardian" in systems and gardian_model is not None:
+            qtype_oh, q_emb, kg_cov = _enrich_live_candidates_for_gardian(
+                question=(item.get("question") or "").strip(),
+                candidates=candidates,
+                qtype=qtype,
+                cfg=cfg,
+                device=device,
+                encoder=encoder,
+                feature_cache=feature_cache,
+                kg=kg,
+                linker=linker,
+                degree_lookup=degree_lookup,
+                node_set=node_set,
+            )
+            gardian_ranked = gardian_model.rerank(
+                candidates=candidates,
+                query_features={
+                    "query_emb": q_emb,
+                    "qtype_onehot": qtype_oh,
+                    "kg_coverage": kg_cov,
+                },
+                device=device,
+            )
+            if gardian_ranked:
+                w = gardian_ranked[0]
+                alpha_triplet = [
+                    float(w.get("sparse_alfa", 0.0)),
+                    float(w.get("dense_alfa", 0.0)),
+                    float(w.get("kg_alfa", 0.0)),
+                ]
+
+        for system in systems:
+            if system == "llm_only":
+                continue
+            if system == "gardian":
+                if not gardian_ranked:
+                    continue
+                scored = [
+                    (float(c.get("gardian_score", 0.0)), c) for c in gardian_ranked
+                ]
+            elif system == "hybrid":
+                scored = [
+                    (
+                        float(c.get("hybrid_rrf_score", 0.0)),
+                        {
+                            "id": c["id"],
+                            "text": c.get("text", ""),
+                            "bm25_score": float(c.get("bm25_score", 0.0)),
+                            "dense_score": float(c.get("dense_score", 0.0)),
+                            "hybrid_rrf_score": float(c.get("hybrid_rrf_score", 0.0)),
+                        },
+                    )
+                    for c in candidates
+                ]
+            elif system == "bm25":
+                scored = [
+                    (
+                        float(c.get("bm25_score", c.get("spladepp_score", 0.0))),
+                        {
+                            "id": c["id"],
+                            "text": c.get("text", ""),
+                            "bm25_score": float(c.get("bm25_score", 0.0)),
+                            "spladepp_score": float(c.get("spladepp_score", 0.0)),
+                        },
+                    )
+                    for c in candidates
+                ]
+            elif system == "dense":
+                scored = [
+                    (
+                        float(c.get("dense_score", c.get("medcpt_score", c.get("score", 0.0)))),
+                        {
+                            "id": c["id"],
+                            "text": c.get("text", ""),
+                            "dense_score": float(c.get("dense_score", 0.0)),
+                            "medcpt_score": float(c.get("medcpt_score", 0.0)),
+                        },
+                    )
+                    for c in candidates
+                ]
+            else:
+                continue
+
+            scored = sorted(scored, key=_live_passage_sort_key, reverse=True)
+            top_passages = [p for _, p in scored[:top_k_reader]]
+            if not top_passages:
+                continue
+
+            answer = run_reader_rag_block(
+                question=q_reader,
+                passages_top_k=top_passages,
+                tokenizer=tokenizer,
+                reader_model=reader_model,
+                device=device,
+                top_k_passages=top_k_reader,
+                max_new_tokens=int(cfg.qa.max_new_tokens),
+                max_input_length=reader_max_input,
+                max_chars_per_passage=passage_max_chars,
+                question_type=item.get("question_type"),
+                reader_task=r_task,
+                alpha_sparse=(alpha_triplet[0] if (system == "gardian" and alpha_triplet) else None),
+                alpha_dense=(alpha_triplet[1] if (system == "gardian" and alpha_triplet) else None),
+                alpha_kg=(alpha_triplet[2] if (system == "gardian" and alpha_triplet) else None),
+                include_signal_features=True,
+                use_react=bool(getattr(cfg.qa, "reader_react", False)),
+                react_max_steps=int(getattr(cfg.qa, "reader_react_max_steps", 6)),
+                react_tokens_per_step=(
+                    int(cfg.qa.reader_react_tokens_per_step)
+                    if cfg.qa.get("reader_react_tokens_per_step") is not None
+                    else None
+                ),
+            )
+            cited_idxs = extract_citations(answer)
+            cit_p, cit_r, uns = _compute_citation_metrics(
+                cited_idxs,
+                top_passages,
+                gold_ids,
+                reader_task=r_task,
+                dataset=dataset,
+            )
+            row: Dict[str, Any] = {
+                "qid": qid,
+                "system": system,
+                "answer": answer,
+                "accuracy": _check_accuracy(
+                    answer,
+                    gold_answer,
+                    dataset,
+                    gold_letter=item.get("answer_letter"),
+                ),
+                "citation_precision": cit_p,
+                "citation_recall": cit_r,
+                "unsupported_claim_rate": uns,
+            }
+            if system == "gardian" and alpha_triplet is not None:
+                row["sparse_alfa"] = alpha_triplet[0]
+                row["dense_alfa"] = alpha_triplet[1]
+                row["kg_alfa"] = alpha_triplet[2]
+                row["fusion_formula"] = "score = alpha_sparse*sparse + alpha_dense*dense + alpha_kg*kg"
+            per_system_rows[system].append(row)
+
+    aggregate: Dict[str, Any] = {
+        "_ci_format": "[mean, ci95_low, ci95_high] — see also *_ci objects with mean/ci95_low/ci95_high",
+    }
+    for system, rows in per_system_rows.items():
+        if not rows:
+            continue
+        aggregate[system] = _aggregate_system_metrics(
+            rows,
+            bootstrap_samples=bootstrap_samples,
+            bootstrap_seed=bootstrap_seed,
+        )
+    logger.info(f"QA live evaluation systems completed: {list(aggregate.keys())}")
+    return aggregate, per_system_rows
 
 
 def evaluate_qa_from_rank_records(
@@ -286,8 +802,20 @@ def evaluate_qa_from_rank_records(
         logger.info(f"QA eval: loaded {len(q_emb_by_qid):,} query embeddings from [{src}]")
 
     reader_max_input = int(cfg.qa.get("reader_max_input_length", 2048) or 2048)
+    passage_max_chars = int(cfg.qa.get("max_chars_per_passage", 600) or 600)
+    if bool(getattr(cfg.qa, "reader_react", False)) and needs_rank_pool:
+        logger.info(
+            "QA eval: Self-RAG–inspired ReAct reader enabled "
+            f"(qa.reader_react=true, max_steps={int(cfg.qa.get('reader_react_max_steps', 6) or 6)})"
+        )
 
-    for item in questions:
+    dataset_names = sorted({str(q.get("dataset") or "dataset") for q in questions})
+    progress_desc = (
+        f"QA {dataset_names[0]}"
+        if len(dataset_names) == 1
+        else f"QA {len(dataset_names)} datasets"
+    )
+    for item in tqdm(questions, desc=progress_desc, unit="question"):
         qid = item.get("id")
         candidates = by_qid.get(qid, [])
         if needs_rank_pool and not candidates:
@@ -391,12 +919,13 @@ def evaluate_qa_from_rank_records(
             elif system == "bm25":
                 scored = [
                     (
-                        float(r.get("bm25_score", 0.0)),
+                        _resolve_sparse_score(r),
                         {
                             "id": r["pid"],
                             "text": _passage_line_text(r, text_lookup),
                             "bm25_score": float(r.get("bm25_score", 0.0)),
-                            "dense_score": float(r.get("dense_score", 0.0)),
+                            "spladepp_score": float(r.get("spladepp_score", 0.0)),
+                            "dense_score": _resolve_dense_score(r),
                         },
                     )
                     for r in candidates
@@ -404,29 +933,19 @@ def evaluate_qa_from_rank_records(
             elif system == "dense":
                 scored = [
                     (
-                        float(r.get("dense_score", 0.0)),
+                        _resolve_dense_score(r),
                         {
                             "id": r["pid"],
                             "text": _passage_line_text(r, text_lookup),
                             "bm25_score": float(r.get("bm25_score", 0.0)),
-                            "dense_score": float(r.get("dense_score", 0.0)),
+                            "spladepp_score": float(r.get("spladepp_score", 0.0)),
+                            "dense_score": _resolve_dense_score(r),
                         },
                     )
                     for r in candidates
                 ]
             elif system == "hybrid":
-                scored = [
-                    (
-                        float(r.get("bm25_score", 0.0)) + float(r.get("dense_score", 0.0)),
-                        {
-                            "id": r["pid"],
-                            "text": _passage_line_text(r, text_lookup),
-                            "bm25_score": float(r.get("bm25_score", 0.0)),
-                            "dense_score": float(r.get("dense_score", 0.0)),
-                        },
-                    )
-                    for r in candidates
-                ]
+                scored = _rrf_fused_candidates(candidates, text_lookup)
             elif system == "doc2query":
                 scored = [
                     (
@@ -442,7 +961,15 @@ def evaluate_qa_from_rank_records(
             else:
                 continue
 
-            scored = sorted(scored, key=lambda x: x[0], reverse=True)
+            def _qa_passage_sort_key(
+                pair: Tuple[float, Dict[str, Any]],
+            ) -> Tuple[float, float, float]:
+                score, d = pair
+                sp = float(d.get("bm25_score", 0.0)) + float(d.get("spladepp_score", 0.0))
+                den = float(d.get("dense_score", 0.0)) + float(d.get("medcpt_score", 0.0))
+                return (score, sp, den)
+
+            scored = sorted(scored, key=_qa_passage_sort_key, reverse=True)
             top_passages = [p for _, p in scored[: int(cfg.qa.top_k_passages)]]
             if not top_passages:
                 continue
@@ -455,6 +982,7 @@ def evaluate_qa_from_rank_records(
                 top_k_passages=int(cfg.qa.top_k_passages),
                 max_new_tokens=int(cfg.qa.max_new_tokens),
                 max_input_length=reader_max_input,
+                max_chars_per_passage=passage_max_chars,
                 question_type=(
                     item.get("question_type")
                     or (candidates[0].get("question_type") if candidates else None)
@@ -474,6 +1002,13 @@ def evaluate_qa_from_rank_records(
                 ),
             )
             cited_idxs = extract_citations(answer)
+            cit_p, cit_r, uns = _compute_citation_metrics(
+                cited_idxs,
+                top_passages,
+                gold_ids,
+                reader_task=r_task,
+                dataset=dataset,
+            )
             row = {
                 "qid": qid,
                 "system": system,
@@ -484,9 +1019,9 @@ def evaluate_qa_from_rank_records(
                     dataset,
                     gold_letter=item.get("answer_letter"),
                 ),
-                "citation_precision": _citation_precision(cited_idxs, top_passages, gold_ids),
-                "citation_recall": _citation_recall(cited_idxs, top_passages, gold_ids),
-                "unsupported_claim_rate": _unsupported_claim_rate(cited_idxs, top_passages, gold_ids),
+                "citation_precision": cit_p,
+                "citation_recall": cit_r,
+                "unsupported_claim_rate": uns,
             }
             if system == "gardian" and alpha_triplet is not None:
                 row["sparse_alfa"] = alpha_triplet[0]
@@ -504,17 +1039,17 @@ def evaluate_qa_from_rank_records(
                 ]
             per_system_rows[system].append(row)
 
-    aggregate: Dict[str, Any] = {}
+    aggregate: Dict[str, Any] = {
+        "_ci_format": "[mean, ci95_low, ci95_high] — see also *_ci objects with mean/ci95_low/ci95_high",
+    }
     for system, rows in per_system_rows.items():
         if not rows:
             continue
-        aggregate[system] = {
-            "n_questions": len(rows),
-            "answer_accuracy": _bootstrap_ci([r["accuracy"] for r in rows], bootstrap_samples, bootstrap_seed),
-            "citation_precision": _bootstrap_ci([r["citation_precision"] for r in rows], bootstrap_samples, bootstrap_seed),
-            "citation_recall": _bootstrap_ci([r["citation_recall"] for r in rows], bootstrap_samples, bootstrap_seed),
-            "unsupported_claim_rate": _bootstrap_ci([r["unsupported_claim_rate"] for r in rows], bootstrap_samples, bootstrap_seed),
-        }
+        aggregate[system] = _aggregate_system_metrics(
+            rows,
+            bootstrap_samples=bootstrap_samples,
+            bootstrap_seed=bootstrap_seed,
+        )
     logger.info(f"QA evaluation systems completed: {list(aggregate.keys())}")
     return aggregate, per_system_rows
 

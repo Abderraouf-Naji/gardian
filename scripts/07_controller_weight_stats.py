@@ -35,26 +35,18 @@ from src.common.question_types import (
 from src.common.rank_data_paths import resolve_rank_data_file
 from src.evaluation.rank_jsonl_eval import load_rank_jsonl
 from src.evaluation.schemas import validate_controller_weights
-from src.model.gardian import GARDIAN
+from src.model.gardian import GARDIAN, build_gardian_from_model_cfg
 
 torch.set_float32_matmul_precision("high")
 
 
 def build_model(cfg, device: str, retriever: str) -> GARDIAN:
-    model = GARDIAN(
-        sparse_dim=int(cfg.model.sparse_feat_dim),
-        dense_dim=int(cfg.model.dense_feat_dim),
-        kg_dim=int(cfg.model.kg_feat_dim),
-        branch_hidden=int(cfg.model.branch_hidden),
-        controller_hidden=int(cfg.model.controller_hidden),
-        query_feat_dim=int(cfg.model.query_feat_dim),
-        n_qtypes=len(cfg.model.question_types),
-        dropout=float(cfg.model.dropout),
-    )
     ckpt_path = pathlib.Path(cfg.paths.results_dir) / f"gardian_best_{retriever}.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt_model_cfg = ckpt.get("cfg", {}).get("model") if isinstance(ckpt.get("cfg"), dict) else None
+    model = build_gardian_from_model_cfg(ckpt_model_cfg or cfg.model)
     model.load_state_dict(ckpt["model_state"])
     model.to(device)
     model.eval()
@@ -75,11 +67,12 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "hybrid",
             "hybrid_neural",
-            "hybrid_bm25_biobert",
-            "hybrid_doc2query_faiss",
-            "doc2query",
+            "hybrid_bm25_faiss",
+            "hybrid_bm25_medcpt",
+            "hybrid_spladepp_faiss",
+            "hybrid_spladepp_medcpt",
         ],
-        default="hybrid",
+        default="hybrid_bm25_faiss",
         help="Retriever family checkpoint and default rank-data naming.",
     )
     p.add_argument("--out", type=str, default="results/controller_weights_by_qtype.json")

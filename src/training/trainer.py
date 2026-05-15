@@ -1,6 +1,7 @@
 import gc
 import json
 import random
+from collections import OrderedDict
 from typing import Dict, List, Optional
 import os
 import pickle
@@ -34,6 +35,9 @@ class StreamingRankDataset(IterableDataset):
         precompute_query_emb: bool = True,
         query_encoder_batch_size: int = 512,
         query_emb_cache_path: Optional[str] = None,
+        query_emb_cache_max_entries: Optional[int] = None,
+        hard_negative_top_n: Optional[int] = None,
+        hard_negative_fraction: float = 0.0,
     ):
         self.path = path
         self.num_neg = max(1, int(num_negatives))
@@ -47,9 +51,54 @@ class StreamingRankDataset(IterableDataset):
         self.query_encoder_batch_size = max(1, int(query_encoder_batch_size))
         self.query_emb_cache_path = query_emb_cache_path
         self._query_encoder = None
-        self._qid_emb_cache: Dict[str, List[float]] = {}
+        self.hard_negative_top_n = (
+            None
+            if hard_negative_top_n in (None, 0)
+            else max(1, int(hard_negative_top_n))
+        )
+        self.hard_negative_fraction = min(1.0, max(0.0, float(hard_negative_fraction)))
+        self._qid_emb_cache: OrderedDict = OrderedDict()
+        self._query_emb_cache_max = (
+            None
+            if query_emb_cache_max_entries in (None, 0)
+            else max(1, int(query_emb_cache_max_entries))
+        )
+        self._effective_emb_cache_max: Optional[int] = None
         self._load_query_emb_cache()
+        self._reconcile_emb_cache_cap()
         self._maybe_precompute_query_embeddings()
+        self._reconcile_emb_cache_cap()
+
+    def _reconcile_emb_cache_cap(self) -> None:
+        if not self._query_emb_cache_max:
+            self._effective_emb_cache_max = None
+            return
+        n = len(self._qid_emb_cache)
+        if n > self._query_emb_cache_max:
+            logger.warning(
+                f"query_emb cache holds {n:,} entries; "
+                f"query_emb_cache_max_entries={self._query_emb_cache_max} is ignored "
+                "so pre-loaded embeddings are not evicted."
+            )
+            self._effective_emb_cache_max = None
+        else:
+            self._effective_emb_cache_max = self._query_emb_cache_max
+
+    def _emb_cache_get(self, qid: str) -> Optional[List[float]]:
+        if qid not in self._qid_emb_cache:
+            return None
+        if self._effective_emb_cache_max:
+            self._qid_emb_cache.move_to_end(qid)
+        return self._qid_emb_cache[qid]
+
+    def _emb_cache_set(self, qid: str, emb_list: List[float]) -> None:
+        if qid in self._qid_emb_cache:
+            del self._qid_emb_cache[qid]
+        self._qid_emb_cache[qid] = emb_list
+        cap = self._effective_emb_cache_max
+        if cap:
+            while len(self._qid_emb_cache) > cap:
+                self._qid_emb_cache.popitem(last=False)
 
     def _load_query_emb_cache(self):
         if not self.query_emb_cache_path:
@@ -61,7 +110,9 @@ class StreamingRankDataset(IterableDataset):
             with p.open("rb") as f:
                 data = pickle.load(f)
             if isinstance(data, dict):
-                self._qid_emb_cache = {str(k): v for k, v in data.items()}
+                self._qid_emb_cache = OrderedDict(
+                    (str(k), v) for k, v in data.items()
+                )
                 logger.info(
                     f"Loaded query_emb cache: {len(self._qid_emb_cache):,} queries from {p}"
                 )
@@ -141,7 +192,7 @@ class StreamingRankDataset(IterableDataset):
                     raise ValueError(
                         f"Precomputed query_emb dim mismatch: got={len(emb_list)} expected={self.query_feat_dim}"
                     )
-                self._qid_emb_cache[qids[i + j]] = emb_list
+                self._emb_cache_set(qids[i + j], emb_list)
         logger.info(f"Precomputed query_emb for {len(self._qid_emb_cache):,} unique queries.")
         self._save_query_emb_cache()
 
@@ -162,8 +213,9 @@ class StreamingRankDataset(IterableDataset):
             return query_emb
 
         qid = str(rec.get("qid", ""))
-        if qid in self._qid_emb_cache:
-            return self._qid_emb_cache[qid]
+        cached = self._emb_cache_get(qid)
+        if cached is not None:
+            return cached
 
         question = rec.get("question")
         if not isinstance(question, str) or not question.strip():
@@ -182,7 +234,7 @@ class StreamingRankDataset(IterableDataset):
             raise ValueError(
                 f"Recomputed query_emb dim mismatch: got={len(emb_list)} expected={self.query_feat_dim}"
             )
-        self._qid_emb_cache[qid] = emb_list
+        self._emb_cache_set(qid, emb_list)
         return emb_list
 
     def _emit_pairs_for_group(self, group: List[dict]):
@@ -194,7 +246,8 @@ class StreamingRankDataset(IterableDataset):
         emitted = 0
         for pos in positives:
             num_negs = min(self.num_neg, len(negatives))
-            for neg in random.sample(negatives, num_negs):
+            sampled_negs = self._sample_negatives(negatives, num_negs)
+            for neg in sampled_negs:
                 if self.max_pairs_per_query is not None and emitted >= self.max_pairs_per_query:
                     return
                 yield (
@@ -210,6 +263,34 @@ class StreamingRankDataset(IterableDataset):
                     ),
                 )
                 emitted += 1
+
+    def _sample_negatives(self, negatives: List[dict], num_negs: int) -> List[dict]:
+        """
+        Mix hard negatives from the top of the candidate pool with random negatives.
+
+        Rank JSONL rows are query-contiguous and keep the first-stage candidate order.
+        Sampling from the top of this list focuses training on top-k errors instead
+        of spending most pairs on easy tail negatives.
+        """
+        if num_negs <= 0:
+            return []
+        if not self.hard_negative_top_n or self.hard_negative_fraction <= 0:
+            return random.sample(negatives, min(num_negs, len(negatives)))
+
+        hard_pool = negatives[: min(self.hard_negative_top_n, len(negatives))]
+        n_hard = min(len(hard_pool), int(round(num_negs * self.hard_negative_fraction)))
+        n_hard = max(1, n_hard) if hard_pool else 0
+        hard = random.sample(hard_pool, n_hard) if n_hard > 0 else []
+        hard_ids = {id(x) for x in hard}
+        rest_pool = [x for x in negatives if id(x) not in hard_ids]
+        n_rest = min(num_negs - len(hard), len(rest_pool))
+        rest = random.sample(rest_pool, n_rest) if n_rest > 0 else []
+        out = hard + rest
+        if len(out) < num_negs:
+            remaining = [x for x in negatives if id(x) not in {id(y) for y in out}]
+            out.extend(random.sample(remaining, min(num_negs - len(out), len(remaining))))
+        random.shuffle(out)
+        return out
 
     def __iter__(self):
         worker_info = get_worker_info()
@@ -273,9 +354,13 @@ def collate_fn(batch):
     return pos_batch, neg_batch
 
 
-def bce_loss(pos_scores: torch.Tensor, neg_scores: torch.Tensor) -> torch.Tensor:
+def bce_loss(
+    pos_scores: torch.Tensor,
+    neg_scores: torch.Tensor,
+    margin: float = 0.0,
+) -> torch.Tensor:
     diff = pos_scores - neg_scores
-    return -torch.log(torch.sigmoid(diff) + 1e-8).mean()
+    return torch.nn.functional.softplus(float(margin) - diff).mean()
 
 
 class GARDIANTrainer:
@@ -287,6 +372,7 @@ class GARDIANTrainer:
         self.device = device
         self._use_amp = device == "cuda"
         self.epoch_logs: List[Dict] = []
+        self.margin = float(getattr(cfg.training, "margin", 0.0) or 0.0)
 
         self.opt = optim.AdamW(
             model.parameters(),
@@ -322,7 +408,7 @@ class GARDIANTrainer:
                 with torch.amp.autocast("cuda"):
                     pos_scores = self.forward_batch(pos_batch)
                     neg_scores = self.forward_batch(neg_batch)
-                    loss = self.loss_fn(pos_scores, neg_scores)
+                    loss = self.loss_fn(pos_scores, neg_scores, margin=self.margin)
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.opt)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
@@ -331,7 +417,7 @@ class GARDIANTrainer:
             else:
                 pos_scores = self.forward_batch(pos_batch)
                 neg_scores = self.forward_batch(neg_batch)
-                loss = self.loss_fn(pos_scores, neg_scores)
+                loss = self.loss_fn(pos_scores, neg_scores, margin=self.margin)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.opt.step()
@@ -352,9 +438,22 @@ class GARDIANTrainer:
 
         num_negs = max(1, int(self.cfg.training.num_negatives))
         max_pairs_per_query = getattr(self.cfg.training, "max_pairs_per_query", None)
+        hard_negative_top_n = getattr(self.cfg.training, "hard_negative_top_n", None)
+        hard_negative_fraction = float(getattr(self.cfg.training, "hard_negative_fraction", 0.0) or 0.0)
         precompute_query_emb = bool(getattr(self.cfg.training, "precompute_query_emb", True))
         query_encoder_batch_size = int(getattr(self.cfg.training, "query_encoder_batch_size", 512))
         query_emb_cache_path = getattr(self.cfg.training, "query_emb_cache_path", None)
+        eval_query_emb_cache_path = query_emb_cache_path
+        if query_emb_cache_path and str(query_emb_cache_path).endswith("_train_all.pkl"):
+            all_cache = str(query_emb_cache_path).replace("_train_all.pkl", "_all.pkl")
+            if os.path.exists(all_cache):
+                eval_query_emb_cache_path = all_cache
+                logger.info(f"Using all-split query_emb cache for evaluation: {all_cache}")
+        eval_batch_size = int(getattr(self.cfg.training, "eval_batch_size", 8192))
+        raw_max = getattr(self.cfg.training, "query_emb_cache_max_entries", None)
+        query_emb_cache_max_entries = (
+            int(raw_max) if raw_max is not None else None
+        )
         num_workers = int(getattr(self.cfg.training, "num_workers", 4))
         if num_workers < 0:
             num_workers = 0
@@ -370,6 +469,9 @@ class GARDIANTrainer:
             precompute_query_emb=precompute_query_emb,
             query_encoder_batch_size=query_encoder_batch_size,
             query_emb_cache_path=query_emb_cache_path,
+            query_emb_cache_max_entries=query_emb_cache_max_entries,
+            hard_negative_top_n=hard_negative_top_n,
+            hard_negative_fraction=hard_negative_fraction,
         )
         train_dl = DataLoader(
             train_ds,
@@ -394,33 +496,31 @@ class GARDIANTrainer:
             is_best = False
             stopped_early = False
 
-            if epoch % 2 == 0 or epoch == 1:
-                did_eval = True
-                dev_ndcg = evaluate_rank_data(
-                    self.model,
-                    dev_path,
-                    self.device,
-                    k=10,
-                    query_encoder_name=str(self.cfg.encoder.model_name),
-                    query_encoder_device="cpu",
-                    query_emb_cache_path=getattr(self.cfg.training, "query_emb_cache_path", None),
-                )
-                logger.info(
-                    f"Epoch {epoch:02d} | Loss={train_loss:.4f} | nDCG@10={dev_ndcg:.4f}"
-                )
-                if dev_ndcg > best_metric:
-                    best_metric = dev_ndcg
-                    best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-                    patience = 0
-                    is_best = True
-                    logger.info(f"  New best nDCG@10={dev_ndcg:.4f}")
-                else:
-                    patience += 1
-                    if patience >= int(self.cfg.training.early_stopping_patience):
-                        logger.info(f"Early stopping after epoch {epoch}")
-                        stopped_early = True
+            did_eval = True
+            dev_ndcg = evaluate_rank_data(
+                self.model,
+                dev_path,
+                self.device,
+                k=10,
+                query_encoder_name=str(self.cfg.encoder.model_name),
+                query_encoder_device="cpu",
+                query_emb_cache_path=eval_query_emb_cache_path,
+                batch_size=eval_batch_size,
+            )
+            logger.info(
+                f"Epoch {epoch:02d} | Loss={train_loss:.4f} | nDCG@10={dev_ndcg:.4f}"
+            )
+            if dev_ndcg > best_metric:
+                best_metric = dev_ndcg
+                best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+                patience = 0
+                is_best = True
+                logger.info(f"  New best nDCG@10={dev_ndcg:.4f}")
             else:
-                logger.info(f"Epoch {epoch:02d} | Loss={train_loss:.4f}")
+                patience += 1
+                if patience >= int(self.cfg.training.early_stopping_patience):
+                    logger.info(f"Early stopping after epoch {epoch}")
+                    stopped_early = True
 
             epoch_log = {
                 "epoch": int(epoch),
