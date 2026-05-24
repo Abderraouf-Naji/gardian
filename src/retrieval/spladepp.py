@@ -258,10 +258,20 @@ class SpladePPRetriever:
             row_lengths,
         )
         self.meta = list(data["meta"])
+        self._move_index_tensors_to_device()
         logger.info(
             f"Loaded SPLADE++ index ({len(self.meta):,} docs, V={self.vocab_size}) "
-            f"from {self.index_file}"
+            f"from {self.index_file} (scoring device={self.device})"
         )
+
+    def _move_index_tensors_to_device(self) -> None:
+        if self.device != "cuda" or self._csr_indptr is None:
+            return
+        dev = torch.device("cuda")
+        self._csr_indptr = self._csr_indptr.to(dev)
+        self._csr_indices = self._csr_indices.to(dev)
+        self._csr_values = self._csr_values.to(dev)
+        self._csr_row_ids = self._csr_row_ids.to(dev)
 
     @torch.no_grad()
     def _encode_query_dense(self, query: str) -> torch.Tensor:
@@ -282,13 +292,14 @@ class SpladePPRetriever:
                 f"SPLADE++ index not loaded: {self.index_file}. Build it first."
             )
 
-        q = self._encode_query_dense(query).cpu()  # [V] dense fp32
+        dev = torch.device(self.device)
+        q = self._encode_query_dense(query)
+        if q.device.type != dev.type:
+            q = q.to(dev)
         # Score per document = sum_{j in nz_doc} q[j] * v_doc[j]
-        # Implemented vectorised: gather q at csr_indices, weight by csr_values,
-        # then scatter into document rows. Row ids are precomputed at load time.
-        gathered = q.index_select(0, self._csr_indices) * self._csr_values  # [nnz]
+        gathered = q.index_select(0, self._csr_indices) * self._csr_values
         n_docs = int(self._csr_indptr.numel() - 1)
-        scores = torch.zeros(n_docs, dtype=torch.float32)
+        scores = torch.zeros(n_docs, dtype=torch.float32, device=dev)
         scores.scatter_add_(0, self._csr_row_ids, gathered)
 
         k = min(int(top_k), n_docs)

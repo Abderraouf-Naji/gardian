@@ -13,8 +13,25 @@ from tqdm import tqdm
 
 from src.common.question_types import normalize_question_type, qtype_onehot
 from src.features.dense_feat import compute_dense_features_with_score
-from src.features.kg_feat import build_degree_lookup, build_node_set, build_query_kg_cache, compute_kg_features
 from src.features.sparse import compute_sparse_features
+from src.pipeline.rank_dense_features import (
+    dense_embedding_pair_for_candidates,
+)
+from src.common.query_emb_cache import load_query_emb_cache
+from src.pipeline.gardian_adaptive import (
+    adaptive_channel_budgets,
+    controller_weights_from_lists,
+    retrieve_adaptive_candidates_live,
+    subset_rank_records_adaptive,
+)
+from src.evaluation.pubmedqa_rag import (
+    gold_context_passages,
+    is_pubmedqa_dataset,
+    resolve_pubmedqa_rag_mode,
+)
+from src.pipeline.rag.metrics import compute_citation_metrics
+from src.pipeline.rag.parser import extract_citations
+from src.pipeline.rag.reader_types import normalize_system_name
 from src.pipeline.rag_reader import (
     format_reader_context,
     retrieve_hybrid_candidates,
@@ -23,14 +40,17 @@ from src.pipeline.rag_reader import (
 )
 
 
+def _gardian_text_only(cfg: Any = None, model: Optional[torch.nn.Module] = None) -> bool:
+    if model is not None:
+        return bool(getattr(model, "text_only", True))
+    if cfg is not None:
+        return bool(getattr(getattr(cfg, "model", None), "text_only", True))
+    return True
+
+
 def format_context(passages: List[Dict], top_k: int = 5) -> str:
     """Backward-compatible alias for :func:`format_reader_context`."""
     return format_reader_context(passages, top_k=top_k, max_chars_per_passage=600)
-
-
-def extract_citations(answer_text: str) -> List[str]:
-    """Parse [P1], [P2] citations from answer text."""
-    return re.findall(r"\[P(\d+)\]", answer_text)
 
 
 def _looks_like_mcq(item: Dict[str, Any]) -> bool:
@@ -338,6 +358,23 @@ def _citation_metrics_applicable(reader_task: str, dataset: str) -> bool:
     return ds in ("pubmedqa", "pubmedqa_labeled", "pubmedqa_artificial") or rt == "yesno"
 
 
+def _gold_evidence_in_reader_context(
+    top_passages: List[Dict[str, Any]],
+    gold_ids: List[str],
+) -> Optional[float]:
+    """
+    Fraction of ``gold_passage_ids`` whose text appears in the reader's top-k.
+
+    Diagnostic for RQ4: links retrieval rerank quality to citation/accuracy outcomes.
+    Returns ``None`` when there is no gold set (e.g. some MedMCQA rows).
+    """
+    gold_set = {g for g in gold_ids if g}
+    if not gold_set:
+        return None
+    shown = {str(p.get("id", "")) for p in top_passages if p.get("id")}
+    return len(gold_set & shown) / len(gold_set)
+
+
 def _compute_citation_metrics(
     cited_idxs: List[str],
     passages: List[Dict],
@@ -345,15 +382,15 @@ def _compute_citation_metrics(
     *,
     reader_task: str,
     dataset: str,
+    answer_text: str = "",
 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    if not _citation_metrics_applicable(reader_task, dataset):
-        return None, None, None
-    if not gold_ids:
-        return None, None, None
-    return (
-        _citation_precision(cited_idxs, passages, gold_ids),
-        _citation_recall(cited_idxs, passages, gold_ids),
-        _unsupported_claim_rate(cited_idxs, passages, gold_ids),
+    return compute_citation_metrics(
+        cited_idxs,
+        passages,
+        gold_ids,
+        reader_task=reader_task,
+        dataset=dataset,
+        answer_text=answer_text,
     )
 
 
@@ -374,6 +411,17 @@ def _aggregate_system_metrics(
     uns_ci = _bootstrap_ci_optional(
         [r.get("unsupported_claim_rate") for r in rows], bootstrap_samples, bootstrap_seed
     )
+    sup_vals = [
+        (1.0 - float(r["unsupported_claim_rate"]))
+        for r in rows
+        if r.get("unsupported_claim_rate") is not None
+    ]
+    sup_ci = _bootstrap_ci_optional(sup_vals, bootstrap_samples, bootstrap_seed)
+    gold_ctx_ci = _bootstrap_ci_optional(
+        [r.get("gold_evidence_in_context_rate") for r in rows],
+        bootstrap_samples,
+        bootstrap_seed,
+    )
     out: Dict[str, Any] = {
         "n_questions": len(rows),
         "answer_accuracy": list(acc_ci),
@@ -382,8 +430,12 @@ def _aggregate_system_metrics(
         "citation_precision_ci": _pack_ci(cit_p_ci),
         "citation_recall": list(cit_r_ci) if cit_r_ci else None,
         "citation_recall_ci": _pack_ci(cit_r_ci),
+        "supported_citation_rate": list(sup_ci) if sup_ci else None,
+        "supported_citation_rate_ci": _pack_ci(sup_ci),
         "unsupported_claim_rate": list(uns_ci) if uns_ci else None,
         "unsupported_claim_rate_ci": _pack_ci(uns_ci),
+        "gold_evidence_in_context_rate": list(gold_ctx_ci) if gold_ctx_ci else None,
+        "gold_evidence_in_context_rate_ci": _pack_ci(gold_ctx_ci),
     }
     return out
 
@@ -431,16 +483,12 @@ def _enrich_live_candidates_for_gardian(
     question: str,
     candidates: List[Dict[str, Any]],
     qtype: str,
-    cfg: Any,
-    device: str,
+    retriever_name: str,
     encoder,
-    feature_cache,
-    kg,
-    linker,
-    degree_lookup,
-    node_set,
-) -> Tuple[List[float], List[float], float]:
-    """Attach branch feature vectors; return (qtype_onehot, query_emb, kg_coverage)."""
+    faiss_lookup=None,
+    medcpt_encoder=None,
+) -> Tuple[List[float], List[float]]:
+    """Attach sparse/dense branch features; return (qtype_onehot, controller query_emb)."""
     qtype_oh = qtype_onehot(normalize_question_type(qtype))
     q_emb = encoder.encode(
         [question],
@@ -448,24 +496,21 @@ def _enrich_live_candidates_for_gardian(
         show_progress_bar=False,
         convert_to_numpy=True,
     )[0]
-    p_embs = feature_cache.get_passage_embeddings(candidates)
+    q_dense, p_embs = dense_embedding_pair_for_candidates(
+        retriever_type=retriever_name,
+        question=question,
+        candidates=candidates,
+        pubmedbert_encoder=encoder,
+        faiss_lookup=faiss_lookup,
+        medcpt_encoder=medcpt_encoder,
+    )
     dense_scores = [
         float(c.get("medcpt_score", c.get("dense_score", c.get("score", 0.0))))
         for c in candidates
     ]
     dense_mean = float(np.mean(dense_scores))
     dense_std = float(np.std(dense_scores) + 1e-8)
-    q_entities = linker.link(question)
-    kg_coverage = 1.0 if q_entities else 0.0
-    query_kg_cache = build_query_kg_cache(
-        q_entities,
-        kg,
-        node_set=node_set,
-        compute_distances=bool(getattr(cfg.kg, "exact_distance_features", False)),
-        max_path=int(getattr(cfg.kg, "max_path_length", 4)),
-    )
     for i, cand in enumerate(candidates):
-        p_entities = feature_cache.get_passage_entities(cand)
         cand["sparse_feats"] = compute_sparse_features(
             query=question,
             passage=cand.get("text", ""),
@@ -473,22 +518,13 @@ def _enrich_live_candidates_for_gardian(
             idf_table=None,
         ).tolist()
         cand["dense_feats"] = compute_dense_features_with_score(
-            q_emb=q_emb,
+            q_emb=q_dense,
             p_emb=p_embs[i],
             dense_score=dense_scores[i],
             score_mean=dense_mean,
             score_std=dense_std,
         ).tolist()
-        cand["kg_feats"] = compute_kg_features(
-            q_entities=q_entities,
-            p_entities=p_entities,
-            G=kg,
-            max_path=int(getattr(cfg.kg, "max_path_length", 4)),
-            query_cache=query_kg_cache,
-            degree_lookup=degree_lookup,
-            node_set=node_set,
-        ).tolist()
-    return qtype_oh, q_emb.tolist(), kg_coverage
+    return qtype_oh, q_emb.tolist()
 
 
 def _live_passage_sort_key(pair: Tuple[float, Dict[str, Any]]) -> Tuple[float, float, float]:
@@ -498,42 +534,211 @@ def _live_passage_sort_key(pair: Tuple[float, Dict[str, Any]]) -> Tuple[float, f
     return (score, sp, den)
 
 
+def _candidate_id(c: Dict[str, Any]) -> str:
+    return str(c.get("id") or c.get("pid") or "")
+
+
+def _live_sparse_score(c: Dict[str, Any]) -> float:
+    return float(c.get("bm25_score", c.get("spladepp_score", 0.0)))
+
+
+def _live_dense_score(c: Dict[str, Any]) -> float:
+    return float(c.get("dense_score", c.get("medcpt_score", c.get("score", 0.0))))
+
+
+def _reader_passage_row(
+    c: Dict[str, Any],
+    *,
+    text_lookup: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    pid = _candidate_id(c)
+    text = c.get("text")
+    if (not isinstance(text, str) or not text.strip()) and text_lookup is not None:
+        text = text_lookup.get(pid, "")
+    return {
+        "id": pid,
+        "text": str(text or ""),
+        "bm25_score": float(c.get("bm25_score", 0.0)),
+        "spladepp_score": float(c.get("spladepp_score", 0.0)),
+        "dense_score": float(c.get("dense_score", c.get("medcpt_score", 0.0))),
+        "medcpt_score": float(c.get("medcpt_score", 0.0)),
+        "hybrid_rrf_score": float(c.get("hybrid_rrf_score", 0.0)),
+    }
+
+
+def _hybrid_balanced_top_passages(
+    pool: List[Dict[str, Any]],
+    k: int,
+    *,
+    text_lookup: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """Top-k for hybrid reader: half from sparse ranking, half from dense (deduped)."""
+    if k <= 0 or not pool:
+        return []
+    k_sparse = (k + 1) // 2
+    k_dense = k - k_sparse
+    by_sparse = sorted(pool, key=_live_sparse_score, reverse=True)
+    by_dense = sorted(pool, key=_live_dense_score, reverse=True)
+    seen: set[str] = set()
+    out: List[Dict[str, Any]] = []
+
+    for c in by_sparse:
+        pid = _candidate_id(c)
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        out.append(_reader_passage_row(c, text_lookup=text_lookup))
+        if len(out) >= k_sparse:
+            break
+
+    dense_added = 0
+    for c in by_dense:
+        pid = _candidate_id(c)
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        out.append(_reader_passage_row(c, text_lookup=text_lookup))
+        dense_added += 1
+        if dense_added >= k_dense:
+            break
+
+    if len(out) < k:
+        by_rrf = sorted(
+            pool,
+            key=lambda c: float(c.get("hybrid_rrf_score", 0.0)),
+            reverse=True,
+        )
+        for c in by_rrf:
+            pid = _candidate_id(c)
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            out.append(_reader_passage_row(c, text_lookup=text_lookup))
+            if len(out) >= k:
+                break
+    return out[:k]
+
+
+def _resolve_reader_top_k(cfg: Any, reader_task: str) -> int:
+    """Effective passages fed to the reader (task-specific caps)."""
+    k = int(getattr(cfg.qa, "top_k_passages", 10) or 10)
+    rt = (reader_task or "open").strip().lower()
+    if rt == "yesno":
+        cap = int(getattr(cfg.qa, "yesno_top_k_passages", 0) or 0)
+        if cap > 0:
+            k = min(k, cap)
+    elif rt == "mcq":
+        cap = int(getattr(cfg.qa, "mcq_top_k_passages", 0) or 0)
+        if cap > 0:
+            k = min(k, cap)
+    return max(1, k)
+
+
+def _hybrid_use_balanced_top_k(cfg: Any) -> bool:
+    """RRF top-k (retrieval-aligned) unless explicitly using balanced hybrid pool."""
+    if bool(getattr(cfg.qa, "rq4_align_retrieval_top_k", True)):
+        return False
+    return bool(getattr(cfg.qa, "hybrid_balanced_top_k", False))
+
+
+def _select_reader_passages(
+    system: str,
+    *,
+    candidates: List[Dict[str, Any]],
+    scored: List[Tuple[float, Dict[str, Any]]],
+    k: int,
+    cfg: Any,
+    gardian_ranked: Optional[List[Dict[str, Any]]] = None,
+    text_lookup: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Passages shown to the reader LLM.
+
+    - **gardian**: top-$k$ by ``gardian_score`` (matches offline reranked Hit@$k$).
+    - **hybrid**: top-$k$ by RRF when ``rq4_align_retrieval_top_k`` (default), else
+      balanced sparse/dense slots if ``hybrid_balanced_top_k``.
+    - **sparse/dense**: top-$k$ by channel score.
+    """
+    if k <= 0:
+        return []
+    if system == "gardian":
+        pool = gardian_ranked or []
+        if not pool:
+            return []
+        ordered = sorted(
+            pool, key=lambda c: float(c.get("gardian_score", 0.0)), reverse=True
+        )
+        return [
+            _reader_passage_row(c, text_lookup=text_lookup) for c in ordered[:k]
+        ]
+    if system == "hybrid" and _hybrid_use_balanced_top_k(cfg):
+        return _hybrid_balanced_top_passages(
+            candidates, k, text_lookup=text_lookup
+        )
+    return [p for _, p in scored[:k]]
+
+
 def evaluate_qa_live(
     questions: List[Dict[str, Any]],
     *,
     systems: List[str],
     cfg: Any,
     device: str,
-    retriever: Any,
+    retriever: Optional[Any],
     gardian_model: Optional[torch.nn.Module],
     tokenizer,
     reader_model,
     encoder,
-    feature_cache,
-    kg,
-    linker,
-    degree_lookup,
-    node_set,
+    retriever_name: str,
+    faiss_lookup=None,
+    medcpt_encoder=None,
     bootstrap_samples: int = 2000,
     bootstrap_seed: int = 42,
     top_candidates: Optional[int] = None,
+    gardian_adaptive_retrieval: bool = False,
+    pubmedqa_rag_mode: Optional[str] = None,
+    gold_passage_lookup: Optional[Dict[str, str]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, List[Dict[str, Any]]]]:
     """
-    QA eval with live hybrid retrieval (unified BM25 + FAISS) → GARDIAN rerank → RAG reader.
+    QA eval with live hybrid retrieval → GARDIAN rerank → RAG reader.
 
-    Matches ``scripts/11_run_gardian_server.py``: retrieve, fuse features, ``gardian.rerank``,
-    then ``run_reader_rag_block`` on the top-k GARDIAN-ordered passages (hybrid baseline uses
-    RRF order from the retriever).
+    Retrieval indices are per-dataset when configured in ``06_end_to_end_qa.py``
+    (``qa.use_per_dataset_indices``); each benchmark's own corpus unless ``--unified-indices``.
+
+    When ``gardian_adaptive_retrieval`` is True, retrieval uses the controller budget
+    (α_sparse, α_dense) for **all** RAG systems on that question (fair shared pool).
+
+    ``pubmedqa_rag_mode=gold_context`` (PubMedQA only): reader sees labeled abstract(s)
+    from ``gold_passage_lookup`` — the standard PubMedQA setting, not open-domain retrieval.
     """
     if "doc2query" in systems:
         logger.warning("doc2query is not supported with live retrieval; skipping that system.")
         systems = [s for s in systems if s != "doc2query"]
+    systems = [normalize_system_name(s) for s in systems]
 
     pool_k = int(top_candidates or getattr(cfg.retrieval, "candidate_pool_size", 100))
-    top_k_reader = int(cfg.qa.top_k_passages)
     reader_max_input = int(cfg.qa.get("reader_max_input_length", 2048) or 2048)
     passage_max_chars = int(cfg.qa.get("max_chars_per_passage", 600) or 600)
-    needs_rank = any(s in systems for s in ("bm25", "dense", "hybrid", "gardian"))
+    yesno_compact = bool(getattr(cfg.qa, "rag_yesno_compact", False))
+    pmqa_mode = resolve_pubmedqa_rag_mode(cfg, pubmedqa_rag_mode)
+    gold_lookup = gold_passage_lookup or {}
+    needs_rank = any(s in systems for s in ("sparse", "dense", "hybrid", "gardian"))
+    if needs_rank:
+        pool_mode = (
+            "adaptive_live"
+            if (
+                gardian_adaptive_retrieval
+                and gardian_model is not None
+                and not bool(getattr(cfg.qa, "rq4_full_union_pool", False))
+            )
+            else "full_union_rrf"
+        )
+        logger.info(
+            f"QA reader top-k={int(getattr(cfg.qa, 'top_k_passages', 10) or 10)} | "
+            f"hybrid_balanced={_hybrid_use_balanced_top_k(cfg)} | "
+            f"rq4_align_retrieval={bool(getattr(cfg.qa, 'rq4_align_retrieval_top_k', True))} | "
+            f"pool={pool_mode}"
+        )
 
     per_system_rows: Dict[str, List[Dict[str, Any]]] = {s: [] for s in systems}
     dataset_names = sorted({str(q.get("dataset") or "dataset") for q in questions})
@@ -583,36 +788,106 @@ def evaluate_qa_live(
         if not needs_rank:
             continue
 
-        candidates = retrieve_hybrid_candidates(
-            (item.get("question") or "").strip(),
-            retriever,
-            top_k=pool_k,
-        )
-        if not candidates:
+        question_text = (item.get("question") or "").strip()
+        use_gold_context = is_pubmedqa_dataset(dataset) and pmqa_mode == "gold_context"
+        retrieval_meta: Optional[Dict[str, Any]] = None
+        if use_gold_context:
+            candidates = gold_context_passages(item, gold_lookup)
+            if not candidates:
+                logger.warning(f"No gold-context passages for qid={qid!r}; skipping RAG systems")
+                continue
+            retrieval_meta = {"mode": "gold_context", "pool_size": len(candidates)}
+        elif retriever is not None:
+            use_adaptive_pool = bool(
+                gardian_adaptive_retrieval
+                and gardian_model is not None
+                and not bool(getattr(cfg.qa, "rq4_full_union_pool", False))
+            )
+            if use_adaptive_pool:
+                qtype_oh = qtype_onehot(normalize_question_type(qtype))
+                q_emb = encoder.encode(
+                    [question_text],
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                )[0].tolist()
+                candidates, alpha_ret, beta_ret = retrieve_adaptive_candidates_live(
+                    question_text,
+                    retriever,
+                    gardian_model,
+                    query_emb=q_emb,
+                    qtype_onehot=qtype_oh,
+                    cfg=cfg,
+                    device=device,
+                )
+                if not candidates:
+                    continue
+                k_sparse, k_dense = adaptive_channel_budgets(alpha_ret, beta_ret, cfg)
+                retrieval_meta = {
+                    "pool_mode": "adaptive_live",
+                    "alpha_sparse": float(alpha_ret),
+                    "alpha_dense": float(beta_ret),
+                    "k_sparse": int(k_sparse),
+                    "k_dense": int(k_dense),
+                    "pool_size": len(candidates),
+                    "cap_sparse": int(
+                        getattr(cfg.retrieval, "top_k_bm25", None)
+                        or getattr(cfg.retrieval, "top_k_spladepp", None)
+                        or 50
+                    ),
+                    "cap_dense": int(
+                        getattr(cfg.retrieval, "top_k_faiss", None)
+                        or getattr(cfg.retrieval, "top_k_medcpt", None)
+                        or 50
+                    ),
+                    "adaptive_channel_budget": str(
+                        getattr(cfg.retrieval, "adaptive_channel_budget", "full_caps")
+                    ),
+                }
+            else:
+                candidates = retrieve_hybrid_candidates(
+                    question_text,
+                    retriever,
+                    top_k=pool_k,
+                )
+                if not candidates:
+                    continue
+                retrieval_meta = {
+                    "pool_mode": "full_union_rrf",
+                    "pool_size": len(candidates),
+                    "cap_sparse": int(
+                        getattr(cfg.retrieval, "top_k_bm25", None)
+                        or getattr(cfg.retrieval, "top_k_spladepp", None)
+                        or 50
+                    ),
+                    "cap_dense": int(
+                        getattr(cfg.retrieval, "top_k_faiss", None)
+                        or getattr(cfg.retrieval, "top_k_medcpt", None)
+                        or 50
+                    ),
+                    "adaptive_channel_budget": "fixed_union_rrf",
+                }
+        else:
+            logger.warning(f"No retriever for qid={qid!r}; skipping RAG systems")
             continue
 
         gardian_ranked: List[Dict[str, Any]] = []
         alpha_triplet = None
         if "gardian" in systems and gardian_model is not None:
-            qtype_oh, q_emb, kg_cov = _enrich_live_candidates_for_gardian(
-                question=(item.get("question") or "").strip(),
+            qtype_oh, q_emb = _enrich_live_candidates_for_gardian(
+                question=question_text,
                 candidates=candidates,
                 qtype=qtype,
-                cfg=cfg,
-                device=device,
+                retriever_name=retriever_name,
                 encoder=encoder,
-                feature_cache=feature_cache,
-                kg=kg,
-                linker=linker,
-                degree_lookup=degree_lookup,
-                node_set=node_set,
+                faiss_lookup=faiss_lookup,
+                medcpt_encoder=medcpt_encoder,
             )
             gardian_ranked = gardian_model.rerank(
                 candidates=candidates,
                 query_features={
                     "query_emb": q_emb,
                     "qtype_onehot": qtype_oh,
-                    "kg_coverage": kg_cov,
                 },
                 device=device,
             )
@@ -621,8 +896,9 @@ def evaluate_qa_live(
                 alpha_triplet = [
                     float(w.get("sparse_alfa", 0.0)),
                     float(w.get("dense_alfa", 0.0)),
-                    float(w.get("kg_alfa", 0.0)),
                 ]
+                if not _gardian_text_only(cfg, gardian_model):
+                    alpha_triplet.append(float(w.get("kg_alfa", 0.0)))
 
         for system in systems:
             if system == "llm_only":
@@ -647,7 +923,7 @@ def evaluate_qa_live(
                     )
                     for c in candidates
                 ]
-            elif system == "bm25":
+            elif system == "sparse":
                 scored = [
                     (
                         float(c.get("bm25_score", c.get("spladepp_score", 0.0))),
@@ -677,7 +953,15 @@ def evaluate_qa_live(
                 continue
 
             scored = sorted(scored, key=_live_passage_sort_key, reverse=True)
-            top_passages = [p for _, p in scored[:top_k_reader]]
+            k_reader = _resolve_reader_top_k(cfg, r_task)
+            top_passages = _select_reader_passages(
+                system,
+                candidates=candidates,
+                scored=scored,
+                k=k_reader,
+                cfg=cfg,
+                gardian_ranked=gardian_ranked if system == "gardian" else None,
+            )
             if not top_passages:
                 continue
 
@@ -687,16 +971,24 @@ def evaluate_qa_live(
                 tokenizer=tokenizer,
                 reader_model=reader_model,
                 device=device,
-                top_k_passages=top_k_reader,
+                top_k_passages=k_reader,
                 max_new_tokens=int(cfg.qa.max_new_tokens),
                 max_input_length=reader_max_input,
                 max_chars_per_passage=passage_max_chars,
                 question_type=item.get("question_type"),
                 reader_task=r_task,
+                yesno_compact=yesno_compact,
+                cfg=cfg,
                 alpha_sparse=(alpha_triplet[0] if (system == "gardian" and alpha_triplet) else None),
                 alpha_dense=(alpha_triplet[1] if (system == "gardian" and alpha_triplet) else None),
-                alpha_kg=(alpha_triplet[2] if (system == "gardian" and alpha_triplet) else None),
-                include_signal_features=True,
+                alpha_kg=(
+                    alpha_triplet[2]
+                    if (system == "gardian" and alpha_triplet and len(alpha_triplet) > 2)
+                    else None
+                ),
+                include_signal_features=bool(
+                    getattr(cfg.qa, "reader_include_signal_features", False)
+                ),
                 use_react=bool(getattr(cfg.qa, "reader_react", False)),
                 react_max_steps=int(getattr(cfg.qa, "reader_react_max_steps", 6)),
                 react_tokens_per_step=(
@@ -712,11 +1004,13 @@ def evaluate_qa_live(
                 gold_ids,
                 reader_task=r_task,
                 dataset=dataset,
+                answer_text=answer,
             )
             row: Dict[str, Any] = {
                 "qid": qid,
                 "system": system,
                 "answer": answer,
+                "passage_ids": [str(p.get("id", "")) for p in top_passages],
                 "accuracy": _check_accuracy(
                     answer,
                     gold_answer,
@@ -726,12 +1020,22 @@ def evaluate_qa_live(
                 "citation_precision": cit_p,
                 "citation_recall": cit_r,
                 "unsupported_claim_rate": uns,
+                "gold_evidence_in_context_rate": _gold_evidence_in_reader_context(
+                    top_passages, gold_ids
+                ),
             }
             if system == "gardian" and alpha_triplet is not None:
                 row["sparse_alfa"] = alpha_triplet[0]
                 row["dense_alfa"] = alpha_triplet[1]
-                row["kg_alfa"] = alpha_triplet[2]
-                row["fusion_formula"] = "score = alpha_sparse*sparse + alpha_dense*dense + alpha_kg*kg"
+                if len(alpha_triplet) > 2:
+                    row["kg_alfa"] = alpha_triplet[2]
+                    row["fusion_formula"] = (
+                        "score = alpha_sparse*sparse + alpha_dense*dense + alpha_kg*kg"
+                    )
+                else:
+                    row["fusion_formula"] = "score = alpha_sparse*sparse + alpha_dense*dense"
+            if retrieval_meta is not None:
+                row["retrieval"] = dict(retrieval_meta)
             per_system_rows[system].append(row)
 
     aggregate: Dict[str, Any] = {
@@ -764,11 +1068,15 @@ def evaluate_qa_from_rank_records(
     passage_text_by_pid: Optional[Dict[str, str]] = None,
     query_emb_cache_path: Optional[Union[str, Sequence[str]]] = None,
     allow_query_emb_encode_on_cache_miss: bool = True,
+    gardian_adaptive_retrieval: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, List[Dict[str, Any]]]]:
     """
     Controlled QA eval using pre-generated rank records for each query.
 
     ``systems`` can include: llm_only, bm25, dense, hybrid, doc2query, gardian.
+
+    When ``gardian_adaptive_retrieval`` is True, GARDIAN uses controller weights to
+    build an α-weighted sparse+dense subset from the rank pool before fusion (query-first).
 
     ``llm_only`` does not require a non-empty candidate pool; other systems need
     rank JSONL candidates for the corresponding ``qid``.
@@ -829,34 +1137,60 @@ def evaluate_qa_from_rank_records(
         scored_cache: Dict[str, List[Tuple[float, Dict[str, Any]]]] = {}
         alpha_triplet = None
         if "gardian" in systems and gardian_model is not None and candidates:
-            with torch.no_grad():
-                sparse = torch.tensor([r["sparse_feats"] for r in candidates], dtype=torch.float32, device=device)
-                dense = torch.tensor([r["dense_feats"] for r in candidates], dtype=torch.float32, device=device)
-                kg = torch.tensor([r["kg_feats"] for r in candidates], dtype=torch.float32, device=device)
-                qvec = _resolve_query_emb_vector(
+            gardian_pool = candidates
+            if gardian_adaptive_retrieval:
+                qvec_pre = _resolve_query_emb_vector(
                     candidates,
                     q_emb_by_qid,
                     cfg,
                     device,
                     allow_encode_on_cache_miss=allow_query_emb_encode_on_cache_miss,
                 )
+                qoh_pre = candidates[0]["qtype_onehot"]
+                alpha, beta = controller_weights_from_lists(
+                    gardian_model,
+                    qvec_pre,
+                    qoh_pre,
+                    device,
+                )
+                gardian_pool = subset_rank_records_adaptive(candidates, alpha, beta, cfg)
+                if not gardian_pool:
+                    gardian_pool = candidates
+
+            with torch.no_grad():
+                sparse = torch.tensor([r["sparse_feats"] for r in gardian_pool], dtype=torch.float32, device=device)
+                dense = torch.tensor([r["dense_feats"] for r in gardian_pool], dtype=torch.float32, device=device)
+                qvec = _resolve_query_emb_vector(
+                    gardian_pool,
+                    q_emb_by_qid,
+                    cfg,
+                    device,
+                    allow_encode_on_cache_miss=allow_query_emb_encode_on_cache_miss,
+                )
                 query_emb = torch.tensor(qvec, dtype=torch.float32, device=device).unsqueeze(0).expand(
-                    len(candidates), -1
+                    len(gardian_pool), -1
                 )
-                qtype = torch.tensor(candidates[0]["qtype_onehot"], dtype=torch.float32, device=device).unsqueeze(0).expand(len(candidates), -1)
-                kg_coverage = torch.full((len(candidates),), float(candidates[0]["kg_coverage"]), dtype=torch.float32, device=device)
-                scores, weights, breakdown = gardian_model(
-                    sparse_feats=sparse,
-                    dense_feats=dense,
-                    kg_feats=kg,
-                    query_emb=query_emb,
-                    qtype_onehot=qtype,
-                    kg_coverage=kg_coverage,
-                    return_breakdown=True,
-                )
+                qtype = torch.tensor(gardian_pool[0]["qtype_onehot"], dtype=torch.float32, device=device).unsqueeze(0).expand(len(gardian_pool), -1)
+                fwd = {
+                    "sparse_feats": sparse,
+                    "dense_feats": dense,
+                    "query_emb": query_emb,
+                    "qtype_onehot": qtype,
+                    "return_breakdown": True,
+                }
+                if not _gardian_text_only(cfg, gardian_model):
+                    fwd["kg_feats"] = torch.tensor(
+                        [r["kg_feats"] for r in gardian_pool], dtype=torch.float32, device=device
+                    )
+                    fwd["kg_coverage"] = torch.full(
+                        (len(gardian_pool),),
+                        float(gardian_pool[0].get("kg_coverage", 0.0)),
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                scores, weights, breakdown = gardian_model(**fwd)
                 sparse_contrib = breakdown["sparse_contrib"].detach().cpu().tolist()
                 dense_contrib = breakdown["dense_contrib"].detach().cpu().tolist()
-                kg_contrib = breakdown["kg_contrib"].detach().cpu().tolist()
                 scored_cache["gardian"] = [
                     (
                         float(s),
@@ -866,18 +1200,17 @@ def evaluate_qa_from_rank_records(
                             "gardian_score": float(s),
                             "sparse_contribution": float(sc),
                             "dense_contribution": float(dc),
-                            "kg_contribution": float(kc),
                             "bm25_score": float(r.get("bm25_score", 0.0)),
                             "dense_score": float(r.get("dense_score", 0.0)),
                             "doc2query_score": float(r.get("doc2query_score", 0.0)),
+                            "adaptive_retrieval": bool(gardian_adaptive_retrieval),
                         },
                     )
-                    for s, r, sc, dc, kc in zip(
+                    for s, r, sc, dc in zip(
                         scores.detach().cpu().tolist(),
-                        candidates,
+                        gardian_pool,
                         sparse_contrib,
                         dense_contrib,
-                        kg_contrib,
                     )
                 ]
                 if weights.shape[0] > 0:
@@ -970,7 +1303,17 @@ def evaluate_qa_from_rank_records(
                 return (score, sp, den)
 
             scored = sorted(scored, key=_qa_passage_sort_key, reverse=True)
-            top_passages = [p for _, p in scored[: int(cfg.qa.top_k_passages)]]
+            k_reader = _resolve_reader_top_k(cfg, r_task)
+            gardian_ranked = [p for _, p in scored] if system == "gardian" else None
+            top_passages = _select_reader_passages(
+                system,
+                candidates=candidates,
+                scored=scored,
+                k=k_reader,
+                cfg=cfg,
+                gardian_ranked=gardian_ranked,
+                text_lookup=text_lookup,
+            )
             if not top_passages:
                 continue
             answer = run_reader_rag_block(
@@ -979,7 +1322,7 @@ def evaluate_qa_from_rank_records(
                 tokenizer=tokenizer,
                 reader_model=reader_model,
                 device=device,
-                top_k_passages=int(cfg.qa.top_k_passages),
+                top_k_passages=k_reader,
                 max_new_tokens=int(cfg.qa.max_new_tokens),
                 max_input_length=reader_max_input,
                 max_chars_per_passage=passage_max_chars,
@@ -991,7 +1334,15 @@ def evaluate_qa_from_rank_records(
                 reader_task=r_task,
                 alpha_sparse=(alpha_triplet[0] if (system == "gardian" and alpha_triplet is not None) else None),
                 alpha_dense=(alpha_triplet[1] if (system == "gardian" and alpha_triplet is not None) else None),
-                alpha_kg=(alpha_triplet[2] if (system == "gardian" and alpha_triplet is not None) else None),
+                alpha_kg=(
+                    alpha_triplet[2]
+                    if (
+                        system == "gardian"
+                        and alpha_triplet is not None
+                        and len(alpha_triplet) > 2
+                    )
+                    else None
+                ),
                 include_signal_features=True,
                 use_react=bool(getattr(cfg.qa, "reader_react", False)),
                 react_max_steps=int(getattr(cfg.qa, "reader_react_max_steps", 6)),
@@ -1008,11 +1359,13 @@ def evaluate_qa_from_rank_records(
                 gold_ids,
                 reader_task=r_task,
                 dataset=dataset,
+                answer_text=answer,
             )
             row = {
                 "qid": qid,
                 "system": system,
                 "answer": answer,
+                "passage_ids": [str(p.get("id", "")) for p in top_passages],
                 "accuracy": _check_accuracy(
                     answer,
                     gold_answer,
@@ -1022,12 +1375,20 @@ def evaluate_qa_from_rank_records(
                 "citation_precision": cit_p,
                 "citation_recall": cit_r,
                 "unsupported_claim_rate": uns,
+                "gold_evidence_in_context_rate": _gold_evidence_in_reader_context(
+                    top_passages, gold_ids
+                ),
             }
             if system == "gardian" and alpha_triplet is not None:
                 row["sparse_alfa"] = alpha_triplet[0]
                 row["dense_alfa"] = alpha_triplet[1]
-                row["kg_alfa"] = alpha_triplet[2]
-                row["fusion_formula"] = "score = alpha_sparse*sparse + alpha_dense*dense + alpha_kg*kg"
+                if len(alpha_triplet) > 2:
+                    row["kg_alfa"] = alpha_triplet[2]
+                    row["fusion_formula"] = (
+                        "score = alpha_sparse*sparse + alpha_dense*dense + alpha_kg*kg"
+                    )
+                else:
+                    row["fusion_formula"] = "score = alpha_sparse*sparse + alpha_dense*dense"
                 row["top_passage_contributions"] = [
                     {
                         "pid": p.get("id"),
@@ -1119,9 +1480,9 @@ def _check_accuracy(
 
 def _citation_precision(cited_idxs: List[str],
                         passages: List[Dict],
-                        gold_ids: List[str]) -> float:
+                        gold_ids: List[str]) -> Optional[float]:
     if not cited_idxs:
-        return 0.0
+        return None
     gold_set = set(gold_ids)
     correct  = 0
     for idx_str in cited_idxs:

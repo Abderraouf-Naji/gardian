@@ -19,6 +19,10 @@ from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 from src.model.gardian import GARDIAN
+from src.pipeline.gardian_adaptive import (
+    controller_weights_from_lists,
+    subset_rank_records_adaptive,
+)
 
 
 def load_rank_jsonl(path: str) -> List[Dict[str, Any]]:
@@ -119,6 +123,56 @@ def compute_recall(ranked_ids: List[str], relevant_ids: List[str], k: int) -> fl
     return len(retrieved_at_k & relevant_set) / len(relevant_set)
 
 
+def compute_hit_at_k(ranked_ids: List[str], relevant_ids: List[str], k: int) -> float:
+    """Success@k: 1 if any relevant doc appears in top-k, else 0 (per query)."""
+    if not relevant_ids:
+        return 0.0
+    relevant_set = set(relevant_ids)
+    return 1.0 if any(pid in relevant_set for pid in ranked_ids[:k]) else 0.0
+
+
+# Metrics aggregated per system in ``metrics_from_score_key`` / GARDIAN scoring.
+RANK_METRIC_KEYS = [
+    "ndcg@5",
+    "ndcg@10",
+    "ndcg@20",
+    "ndcg@50",
+    "ndcg@100",
+    "recall@5",
+    "recall@10",
+    "recall@20",
+    "recall@50",
+    "recall@100",
+    "hit@5",
+    "hit@10",
+    "hit@20",
+    "hit@50",
+    "mrr",
+]
+
+
+def _append_rank_metrics(
+    lists: Dict[str, List[float]],
+    ranked_ids: List[str],
+    relevant_ids: List[str],
+) -> None:
+    lists["ndcg@5"].append(compute_ndcg(ranked_ids, relevant_ids, 5))
+    lists["ndcg@10"].append(compute_ndcg(ranked_ids, relevant_ids, 10))
+    lists["ndcg@20"].append(compute_ndcg(ranked_ids, relevant_ids, 20))
+    lists["ndcg@50"].append(compute_ndcg(ranked_ids, relevant_ids, 50))
+    lists["ndcg@100"].append(compute_ndcg(ranked_ids, relevant_ids, 100))
+    lists["recall@5"].append(compute_recall(ranked_ids, relevant_ids, 5))
+    lists["recall@10"].append(compute_recall(ranked_ids, relevant_ids, 10))
+    lists["recall@20"].append(compute_recall(ranked_ids, relevant_ids, 20))
+    lists["recall@50"].append(compute_recall(ranked_ids, relevant_ids, 50))
+    lists["recall@100"].append(compute_recall(ranked_ids, relevant_ids, 100))
+    lists["hit@5"].append(compute_hit_at_k(ranked_ids, relevant_ids, 5))
+    lists["hit@10"].append(compute_hit_at_k(ranked_ids, relevant_ids, 10))
+    lists["hit@20"].append(compute_hit_at_k(ranked_ids, relevant_ids, 20))
+    lists["hit@50"].append(compute_hit_at_k(ranked_ids, relevant_ids, 50))
+    lists["mrr"].append(compute_mrr(ranked_ids, relevant_ids))
+
+
 def _aggregate_lists(
     lists: Dict[str, List[float]],
 ) -> Dict[str, float]:
@@ -132,6 +186,7 @@ def _new_query_bucket() -> Dict[str, Any]:
         "dense_scores": [],
         "fusion_scores": [],
         "spladepp_scores": [],
+        "cross_encoder_scores": [],
     }
 
 
@@ -197,7 +252,11 @@ def evaluate_all_from_rank_data(
     collect_per_query: bool = False,
     query_encoder_name: Optional[str] = None,
     query_encoder_device: str = "cpu",
+    expected_query_feat_dim: Optional[int] = None,
     canonical_baseline_keys: bool = False,
+    include_standalone_spladepp: bool = False,
+    gardian_adaptive_retrieval: bool = False,
+    cfg: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Mean metrics over queries; optionally per-query lists for bootstrap CIs.
@@ -208,6 +267,10 @@ def evaluate_all_from_rank_data(
     reflect the actual first-stage channels (e.g. ``sparse(doc2query)``,
     ``dense(biobert)``, ``sum(doc2query,biobert)``) instead of generic
     ``bm25`` / ``dense`` / ``hybrid``.
+
+    When ``gardian_adaptive_retrieval`` is True (``cfg.qa.gardian_adaptive_retrieval``),
+  GARDIAN nDCG uses the α-weighted sparse+dense subset per query before fusion
+    (same as QA). Baselines (sparse, dense, RRF) still use the full hybrid pool.
     """
     logger.info(f"Loading rank data: {rank_data_path}")
     p = pathlib.Path(rank_data_path)
@@ -273,6 +336,9 @@ def evaluate_all_from_rank_data(
         queries[qid]["dense_scores"].append(dense_score)
         queries[qid]["fusion_scores"].append(fusion_score)
         queries[qid]["spladepp_scores"].append(float(rec.get("spladepp_score", 0.0)))
+        queries[qid]["cross_encoder_scores"].append(
+            float(rec.get("cross_encoder_score", 0.0))
+        )
 
         if want_query_cache:
             qid_s = str(rec.get("qid", ""))
@@ -293,13 +359,16 @@ def evaluate_all_from_rank_data(
     if not queries:
         return {}
 
-    model_query_dim: Optional[int] = None
-    if model is not None and first_rec is not None:
+    model_query_dim: Optional[int] = (
+        int(expected_query_feat_dim) if expected_query_feat_dim is not None else None
+    )
+    if model_query_dim is None and model is not None and first_rec is not None:
         first_layer = getattr(getattr(model, "controller", None), "net", None)
         try:
             if first_layer is not None and hasattr(first_layer[0], "in_features"):
                 qtype_dim = len(first_rec.get("qtype_onehot", []))
-                model_query_dim = int(first_layer[0].in_features) - int(qtype_dim) - 1
+                # Controller input is query_feat_dim + n_qtypes (see ControllerMLP).
+                model_query_dim = int(first_layer[0].in_features) - int(qtype_dim)
         except Exception:
             model_query_dim = None
 
@@ -366,9 +435,12 @@ def evaluate_all_from_rank_data(
         rank_retriever_type, canonical_baseline_keys=canonical_baseline_keys
     )
 
+    records_by_qid: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
     if model is not None and device is not None:
         for rec in iter_rank_jsonl_records(rank_data_path):
             qid = rec["qid"]
+            records_by_qid[qid].append(rec)
             gardian_features[qid]["candidates"].append(
                 {"pid": rec["pid"], "label": rec["label"]}
             )
@@ -378,9 +450,10 @@ def evaluate_all_from_rank_data(
             gardian_features[qid]["dense_feats"].append(
                 torch.tensor(rec["dense_feats"], dtype=torch.float32)
             )
-            gardian_features[qid]["kg_feats"].append(
-                torch.tensor(rec["kg_feats"], dtype=torch.float32)
-            )
+            if not bool(getattr(model, "text_only", True)):
+                gardian_features[qid]["kg_feats"].append(
+                    torch.tensor(rec["kg_feats"], dtype=torch.float32)
+                )
             if gardian_features[qid]["query_emb"] is None:
                 query_emb = _resolve_query_emb(rec)
                 gardian_features[qid]["query_emb"] = torch.tensor(
@@ -389,7 +462,8 @@ def evaluate_all_from_rank_data(
                 gardian_features[qid]["qtype_onehot"] = torch.tensor(
                     rec["qtype_onehot"], dtype=torch.float32
                 )
-                gardian_features[qid]["kg_coverage"] = rec["kg_coverage"]
+                if not bool(getattr(model, "text_only", True)):
+                    gardian_features[qid]["kg_coverage"] = rec.get("kg_coverage", 0.0)
 
     for qid, qdata in queries.items():
         qdata["rrf_scores"] = _rrf_scores_for_query(
@@ -402,19 +476,7 @@ def evaluate_all_from_rank_data(
         score_key: str,
         collect: bool,
     ) -> Tuple[Dict[str, float], Optional[Dict[str, List[float]]], int]:
-        keys = [
-            "ndcg@5",
-            "ndcg@10",
-            "ndcg@20",
-            "ndcg@50",
-            "ndcg@100",
-            "recall@5",
-            "recall@20",
-            "recall@50",
-            "recall@100",
-            "mrr",
-        ]
-        lists: Dict[str, List[float]] = {k: [] for k in keys}
+        lists: Dict[str, List[float]] = {k: [] for k in RANK_METRIC_KEYS}
         no_positive_queries = 0
         for qid, qdata in queries_data.items():
             scores = qdata[score_key]
@@ -423,16 +485,7 @@ def evaluate_all_from_rank_data(
             relevant_ids = [c["pid"] for c in qdata["candidates"] if c["label"] == 1]
             if not relevant_ids:
                 no_positive_queries += 1
-            lists["ndcg@5"].append(compute_ndcg(ranked_ids, relevant_ids, 5))
-            lists["ndcg@10"].append(compute_ndcg(ranked_ids, relevant_ids, 10))
-            lists["ndcg@20"].append(compute_ndcg(ranked_ids, relevant_ids, 20))
-            lists["ndcg@50"].append(compute_ndcg(ranked_ids, relevant_ids, 50))
-            lists["ndcg@100"].append(compute_ndcg(ranked_ids, relevant_ids, 100))
-            lists["recall@5"].append(compute_recall(ranked_ids, relevant_ids, 5))
-            lists["recall@20"].append(compute_recall(ranked_ids, relevant_ids, 20))
-            lists["recall@50"].append(compute_recall(ranked_ids, relevant_ids, 50))
-            lists["recall@100"].append(compute_recall(ranked_ids, relevant_ids, 100))
-            lists["mrr"].append(compute_mrr(ranked_ids, relevant_ids))
+            _append_rank_metrics(lists, ranked_ids, relevant_ids)
         means = _aggregate_lists(lists)
         means["mrr@10"] = means["mrr"]
         pq = lists if collect else None
@@ -478,7 +531,8 @@ def evaluate_all_from_rank_data(
 
     _emit("rrf", "rrf_scores")
     skip_standalone_spladepp = bool(
-        canonical_baseline_keys and sparse_key == "sparse(spladepp)"
+        not include_standalone_spladepp
+        or (canonical_baseline_keys and sparse_key == "sparse(spladepp)")
     )
     if not skip_standalone_spladepp:
         for name, key in [("spladepp", "spladepp_scores")]:
@@ -490,10 +544,20 @@ def evaluate_all_from_rank_data(
                 results[name] = m
                 results["_meta"][f"{name}_no_positive_queries"] = no_pos
 
+    if _score_key_has_nonzero_signal(qdict, "cross_encoder_scores"):
+        _emit("cross_encoder", "cross_encoder_scores")
+
     if model is not None and device is not None and gardian_features:
-        logger.info(
-            f"  Evaluating GARDIAN (ablation={gardian_ablation!r})..."
-        )
+        use_adaptive = bool(gardian_adaptive_retrieval and cfg is not None)
+        if use_adaptive:
+            logger.info(
+                "  GARDIAN adaptive retrieval: query→(α,β)→sparse/dense subset→fusion "
+                f"(ablation={gardian_ablation!r})"
+            )
+        else:
+            logger.info(f"  Evaluating GARDIAN (ablation={gardian_ablation!r})...")
+        results["_meta"]["gardian_adaptive_retrieval"] = use_adaptive
+
         gardian_results: Dict[str, Dict[str, Any]] = defaultdict(
             lambda: {"candidates": [], "scores": []}
         )
@@ -505,42 +569,45 @@ def evaluate_all_from_rank_data(
             ):
                 if not qdata["candidates"]:
                     continue
+                # Score the FULL rank pool (same candidates as RRF). Pre-subsetting by
+                # adaptive_channel_budget dropped high-RRF / low-single-channel gold
+                # docs and inflated retrieval metrics vs E2E QA unfairly.
+                if use_adaptive and qdata["query_emb"] is not None:
+                    pool_records = records_by_qid.get(qid, [])
+                    if pool_records:
+                        controller_weights_from_lists(
+                            model,
+                            qdata["query_emb"].cpu().tolist(),
+                            qdata["qtype_onehot"].cpu().tolist(),
+                            device,
+                            ablation=gardian_ablation,
+                        )
                 batch_size = len(qdata["candidates"])
                 sparse_batch = torch.stack(qdata["sparse_feats"]).to(device)
                 dense_batch = torch.stack(qdata["dense_feats"]).to(device)
-                kg_batch = torch.stack(qdata["kg_feats"]).to(device)
                 query_emb = qdata["query_emb"].unsqueeze(0).expand(batch_size, -1).to(device)
                 qtype_onehot = qdata["qtype_onehot"].unsqueeze(0).expand(batch_size, -1).to(device)
-                kg_coverage = torch.full(
-                    (batch_size,),
-                    qdata["kg_coverage"],
-                    dtype=torch.float32,
-                ).to(device)
-                scores, _ = model(
-                    sparse_feats=sparse_batch,
-                    dense_feats=dense_batch,
-                    kg_feats=kg_batch,
-                    query_emb=query_emb,
-                    qtype_onehot=qtype_onehot,
-                    kg_coverage=kg_coverage,
-                    ablation=gardian_ablation,
-                )
+                fwd = {
+                    "sparse_feats": sparse_batch,
+                    "dense_feats": dense_batch,
+                    "query_emb": query_emb,
+                    "qtype_onehot": qtype_onehot,
+                    "ablation": gardian_ablation,
+                }
+                if not bool(getattr(model, "text_only", True)):
+                    kg_batch = torch.stack(qdata["kg_feats"]).to(device)
+                    kg_coverage = torch.full(
+                        (batch_size,),
+                        float(qdata.get("kg_coverage") or 0.0),
+                        dtype=torch.float32,
+                    ).to(device)
+                    fwd["kg_feats"] = kg_batch
+                    fwd["kg_coverage"] = kg_coverage
+                scores, _ = model(**fwd)
                 gardian_results[qid]["candidates"] = qdata["candidates"]
                 gardian_results[qid]["scores"] = scores.cpu().numpy().flatten()
 
-        keys = [
-            "ndcg@5",
-            "ndcg@10",
-            "ndcg@20",
-            "ndcg@50",
-            "ndcg@100",
-            "recall@5",
-            "recall@20",
-            "recall@50",
-            "recall@100",
-            "mrr",
-        ]
-        lists: Dict[str, List[float]] = {k: [] for k in keys}
+        lists: Dict[str, List[float]] = {k: [] for k in RANK_METRIC_KEYS}
         no_positive_queries = 0
         for qid, qdata in gardian_results.items():
             if not qdata["scores"].size:
@@ -550,16 +617,7 @@ def evaluate_all_from_rank_data(
             relevant_ids = [c["pid"] for c in qdata["candidates"] if c["label"] == 1]
             if not relevant_ids:
                 no_positive_queries += 1
-            lists["ndcg@5"].append(compute_ndcg(ranked_ids, relevant_ids, 5))
-            lists["ndcg@10"].append(compute_ndcg(ranked_ids, relevant_ids, 10))
-            lists["ndcg@20"].append(compute_ndcg(ranked_ids, relevant_ids, 20))
-            lists["ndcg@50"].append(compute_ndcg(ranked_ids, relevant_ids, 50))
-            lists["ndcg@100"].append(compute_ndcg(ranked_ids, relevant_ids, 100))
-            lists["recall@5"].append(compute_recall(ranked_ids, relevant_ids, 5))
-            lists["recall@20"].append(compute_recall(ranked_ids, relevant_ids, 20))
-            lists["recall@50"].append(compute_recall(ranked_ids, relevant_ids, 50))
-            lists["recall@100"].append(compute_recall(ranked_ids, relevant_ids, 100))
-            lists["mrr"].append(compute_mrr(ranked_ids, relevant_ids))
+            _append_rank_metrics(lists, ranked_ids, relevant_ids)
 
         results["gardian"] = _aggregate_lists(lists)
         results["gardian"]["mrr@10"] = results["gardian"]["mrr"]

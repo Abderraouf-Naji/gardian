@@ -1,0 +1,13 @@
+retriever,dataset,system,ndcg@10,ndcg@20,ndcg@50,mrr,recall@10,recall@20,hit@10
+hybrid_bm25_faiss,pubmedqa_labeled,hybrid,0.808337,0.822737,0.832974,0.960966,0.809838,0.849674,0.986000
+hybrid_bm25_faiss,pubmedqa_labeled,rrf,0.863236,0.889078,0.900325,0.974136,0.878324,0.949633,0.991000
+hybrid_bm25_faiss,pubmedqa_labeled,gardian,0.900749,0.915790,0.925045,0.981888,0.917431,0.959083,0.994000
+hybrid_bm25_faiss,pubmedqa_labeled,cross_encoder_msmarco_minilm,0.866266,0.884008,0.899350,0.981202,0.868714,0.917824,0.993000
+hybrid_bm25_faiss,pubmedqa_labeled,cross_encoder_monot5_med,0.918933,0.932541,0.940676,0.986423,0.930481,0.967000,0.997000
+hybrid_bm25_faiss,pubmedqa_labeled,cross_encoder_monobert,0.891595,0.905318,0.917341,0.983241,0.897105,0.934388,0.995000
+hybrid_bm25_faiss,medmcqa,hybrid,0.372560,0.389485,0.403755,0.327036,0.547000,0.614000,0.547000
+hybrid_bm25_faiss,medmcqa,rrf,0.391409,0.412388,0.432507,0.341352,0.584000,0.666000,0.584000
+hybrid_bm25_faiss,medmcqa,gardian,0.415263,0.437405,0.457357,0.367593,0.599000,0.686000,0.599000
+hybrid_bm25_faiss,medmcqa,cross_encoder_msmarco_minilm,0.447593,0.466251,0.481402,0.397257,0.633000,0.706000,0.633000
+hybrid_bm25_faiss,medmcqa,cross_encoder_monot5_med,0.493168,0.511616,0.520950,0.437918,0.692000,0.763000,0.692000
+hybrid_bm25_faiss,medmcqa,cross_encoder_monobert,0.475597,0.494881,0.506203,0.421720,0.672000,0.747000,0.672000

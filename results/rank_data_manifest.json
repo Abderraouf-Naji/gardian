@@ -1,0 +1,61 @@
+{
+  "created_utc": "2026-05-16T08:08:54.045634+00:00",
+  "script": "scripts/03_generate_rank_data.py",
+  "args": {
+    "mode": "per-corpus",
+    "retriever": "hybrid_bm25_medcpt",
+    "max_queries": null,
+    "dataset": "all",
+    "lean_records": false,
+    "no_write_query_cache": false,
+    "dense_from_retriever_scores": false,
+    "no_dense_from_retriever_scores": false,
+    "kg_refine_top_n": null,
+    "exact_kg_distances": false,
+    "no_exact_kg_distances": false,
+    "device": "cuda",
+    "faiss_gpu": false,
+    "no_faiss_gpu": false,
+    "text_only": null,
+    "passage_entity_cache_max": 150000
+  },
+  "seed": 42,
+  "encoder_model": "NeuML/pubmedbert-base-embeddings",
+  "expected_query_feat_dim": 768,
+  "platform": "Linux-6.8.0-111-generic-x86_64-with-glibc2.39",
+  "python_version": "3.12.3 (main, Mar 23 2026, 19:04:32) [GCC 13.3.0]",
+  "files": {
+    "configs/base.yaml": {
+      "exists": true,
+      "sha256": "17aa228435b530c6db37482d25ab826391e8a512c2afc0b5f337485c43992e3c"
+    },
+    "data/pubmedqa_artificial_train.jsonl": {
+      "exists": true,
+      "sha256": "645f9fb0bffbfe4e41aa913ffcbdece3e65d981330ac84a9d8bf3d83d8385ac7"
+    },
+    "data/pubmedqa_artificial_dev.jsonl": {
+      "exists": true,
+      "sha256": "355ea27679a133422dc84d0c00a8a4d647dd035f7dc103183b507ba247c7d6a7"
+    },
+    "data/pubmedqa_artificial_test.jsonl": {
+      "exists": true,
+      "sha256": "ed244561d02c322e4cbbf57266744678a4e8e0f4447b243f345d761eb44eb98d"
+    },
+    "data/pubmedqa_labeled_eval.jsonl": {
+      "exists": true,
+      "sha256": "d3cb18dddea8fe531845bcb9d8a1cbf285ea9b92cd46ac18e00b616d5a10a17d"
+    },
+    "data/medmcqa_train.jsonl": {
+      "exists": true,
+      "sha256": "738a787985b7ef6f91f00772e6f29dc147c87b881b40f98b4604f3c65eb5c9d3"
+    },
+    "data/medmcqa_dev.jsonl": {
+      "exists": true,
+      "sha256": "a84050b9773c16a3905f905d4c2fcd4e5eae70437bf5e8c7018886ef0536a43c"
+    },
+    "data/medmcqa_test.jsonl": {
+      "exists": true,
+      "sha256": "00bc02718fa0a83741347d66dd1767c45cb7a53e191066a535be07943726c909"
+    }
+  }
+}

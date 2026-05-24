@@ -53,7 +53,7 @@ class OnlinePassageFeatureCache:
         *,
         embedding_index_path: str,
         embedding_meta_path: str,
-        linker: EntityLinker,
+        linker: Optional[EntityLinker] = None,
         encoder=None,
         max_entity_cache: int = 200_000,
     ) -> None:
@@ -95,6 +95,8 @@ class OnlinePassageFeatureCache:
 
     def get_passage_entities(self, candidate: Dict) -> List[str]:
         """Return cached linked KG entities for one candidate passage."""
+        if self.linker is None:
+            return []
         pid = str(candidate.get("id", ""))
         if pid and pid in self._entity_cache:
             if self._entity_cache_max is not None:

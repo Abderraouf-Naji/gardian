@@ -1,5 +1,16 @@
-"""Paper experiment driver for retriever-family ablations + significance stats.
-python3 scripts/10_paper_run.py --device cuda --parallel-workers 1 --cuda-devices 0"""
+"""Paper experiment driver: GARDIAN ablations + per-question-type analysis (text-only).
+
+Example (single hybrid family, no KG):
+  python3 scripts/10_paper_run.py \\
+    --retrievers hybrid_bm25_faiss \\
+    --device cuda \\
+    --parallel-workers 1 \\
+    --out results/ablation_hybrid_bm25_faiss.json
+
+Answers RQ: how unified sparse+dense re-ranking gains vary across diagnosis,
+treatment, mechanism, contraindication, factoid (and yesno on PubMedQA) when only
+text features are used.
+"""
 
 from __future__ import annotations
 
@@ -20,8 +31,14 @@ from omegaconf import OmegaConf
 
 sys.path.insert(0, ".")
 
+from src.common.hybrid_retrievers import FOCUS_HYBRID_RETRIEVERS
 from src.common.question_types import assert_cfg_question_types
 from src.evaluation.paper_bundle import run_paper_chunk
+from src.evaluation.qtype_breakdown import (
+    RESEARCH_QUESTION_TYPES,
+    print_question_type_summary,
+    run_qtype_analysis_for_retriever,
+)
 from src.evaluation.schemas import validate_paper_bundle
 
 torch.set_float32_matmul_precision("high")
@@ -31,23 +48,15 @@ DATASET_SPLITS = [
     ("pubmedqa_artificial", "test"),
     ("medmcqa", "test"),
 ]
-RETRIEVER_CHOICES = [
-    "hybrid",
-    "hybrid_neural",
-    "hybrid_bm25_faiss",
-    "hybrid_bm25_medcpt",
-    "hybrid_spladepp_faiss",
-    "hybrid_spladepp_medcpt",
-]
+
+RETRIEVER_CHOICES = list(FOCUS_HYBRID_RETRIEVERS) + ["hybrid", "hybrid_neural"]
 
 ABLATION_CHOICES = [
     "full",
     "uniform_alpha",
     "no_qtype",
-    "no_kg_coverage",
     "no_sparse_signal",
     "no_dense_signal",
-    "no_kg_signal",
 ]
 
 
@@ -98,7 +107,9 @@ def _merge_chunk_results(target: Dict[str, Any], partial: Dict[str, Dict[str, An
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Paper / CIKM evaluation bundle.")
+    p = argparse.ArgumentParser(
+        description="Paper bundle: text-only GARDIAN ablations + question-type breakdown."
+    )
     p.add_argument("--cfg", type=str, default="configs/base.yaml")
     p.add_argument(
         "--out",
@@ -120,8 +131,7 @@ def parse_args() -> argparse.Namespace:
         default="all",
         help=(
             "Comma list from hybrid_bm25_faiss, hybrid_bm25_medcpt, "
-            "hybrid_spladepp_faiss, hybrid_spladepp_medcpt — or 'all' "
-            "to evaluate every hybrid family."
+            "hybrid_spladepp_faiss, hybrid_spladepp_medcpt — or 'all'."
         ),
     )
     p.add_argument(
@@ -141,13 +151,23 @@ def parse_args() -> argparse.Namespace:
         "--parallel-workers",
         type=int,
         default=4,
-        help="Number of parallel processes per retriever (ablations split across workers). Use 1 to disable.",
+        help="Parallel processes per retriever (ablations split across workers). Use 1 to disable.",
     )
     p.add_argument(
         "--cuda-devices",
         type=str,
         default="0,1,2,3",
-        help="Comma-separated GPU ids; worker i uses cuda:ids[i %% len(ids)]. Ignored when device is cpu.",
+        help="GPU ids for workers (worker i uses ids[i %% len(ids)]). Ignored on CPU.",
+    )
+    p.add_argument(
+        "--no-qtype-analysis",
+        action="store_true",
+        help="Skip per-question-type comparison (diagnosis, treatment, …, factoid, yesno).",
+    )
+    p.add_argument(
+        "--skip-ablations",
+        action="store_true",
+        help="Only run question-type analysis (no GARDIAN ablation grid).",
     )
     return p.parse_args()
 
@@ -156,6 +176,8 @@ def main() -> None:
     args = parse_args()
     cfg = OmegaConf.load(args.cfg)
     assert_cfg_question_types(cfg.model.question_types)
+    if not bool(getattr(cfg.model, "text_only", True)):
+        logger.warning("cfg.model.text_only is false; paper bundle expects text-only (no KG).")
 
     if args.device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -170,17 +192,8 @@ def main() -> None:
         if name not in ABLATION_CHOICES:
             raise SystemExit(f"Unknown ablation {name!r}. Choose from {ABLATION_CHOICES}")
 
-    # ``all`` expands to the four canonical hybrid families used in the
-    # paper; legacy aliases ``hybrid`` / ``hybrid_neural`` are still accepted
-    # when supplied explicitly via --retrievers.
-    canonical_hybrids = [
-        "hybrid_bm25_faiss",
-        "hybrid_bm25_medcpt",
-        "hybrid_spladepp_faiss",
-        "hybrid_spladepp_medcpt",
-    ]
     retrievers = (
-        canonical_hybrids
+        list(FOCUS_HYBRID_RETRIEVERS)
         if args.retrievers == "all"
         else [x.strip() for x in args.retrievers.split(",") if x.strip()]
     )
@@ -206,76 +219,95 @@ def main() -> None:
             "randomization_trials": int(args.randomization_trials),
             "parallel_workers": int(args.parallel_workers),
             "cuda_devices": cuda_ids if device == "cuda" else None,
+            "text_only": bool(getattr(cfg.model, "text_only", True)),
+            "research_question": (
+                "How do benefits of unified sparse+dense re-ranking vary across "
+                "diagnosis, treatment, mechanism, contraindication, and factoid "
+                "(and yesno on PubMedQA) when only text features are used?"
+            ),
+            "research_question_types": list(RESEARCH_QUESTION_TYPES),
         },
         "results": {},
+        "question_type_analysis": {},
     }
 
     parallel = int(args.parallel_workers) > 1
     if parallel and device == "cuda":
         logger.info(
-            f"Parallel mode: {args.parallel_workers} workers per retriever, CUDA devices {cuda_ids} "
-            "(each worker loads a full model; map one GPU id per worker to avoid OOM)."
+            f"Parallel mode: {args.parallel_workers} workers per retriever, CUDA devices {cuda_ids}"
         )
         if len(cuda_ids) == 1:
             logger.warning(
-                "All parallel workers use the same GPU id; this often causes CUDA OOM. "
-                "Use e.g. --cuda-devices 0,1,2,3 with four GPUs, or --parallel-workers 1."
+                "All parallel workers share one GPU; use --cuda-devices 0,1,2,3 or --parallel-workers 1."
             )
 
     for retriever in retrievers:
         logger.info(f"=== Retriever={retriever} ===")
         ckpt_path = pathlib.Path(cfg.paths.results_dir) / f"gardian_best_{retriever}.pt"
         if not ckpt_path.exists():
-            logger.warning(f"Skipping retriever {retriever}: Checkpoint not found: {ckpt_path}")
+            logger.warning(f"Skipping retriever {retriever}: checkpoint not found: {ckpt_path}")
             continue
 
-        bundle["results"][retriever] = {}
-        ablation_chunks = _split_contiguous(want, int(args.parallel_workers))
+        if not args.skip_ablations:
+            bundle["results"][retriever] = {}
+            ablation_chunks = _split_contiguous(want, int(args.parallel_workers))
 
-        if not parallel or len(ablation_chunks) <= 1:
-            partial = run_paper_chunk(
+            if not parallel or len(ablation_chunks) <= 1:
+                partial = run_paper_chunk(
+                    project_root,
+                    retriever,
+                    cfg_abs,
+                    list(DATASET_SPLITS),
+                    want,
+                    device,
+                    int(args.bootstrap),
+                    int(args.seed),
+                    int(args.randomization_trials),
+                    query_encoder_name,
+                )
+                _merge_chunk_results(bundle["results"][retriever], partial)
+            else:
+                ctx = mp.get_context("spawn")
+                futures = []
+                with ProcessPoolExecutor(max_workers=len(ablation_chunks), mp_context=ctx) as pool:
+                    for idx, ab_chunk in enumerate(ablation_chunks):
+                        vis = (
+                            str(cuda_ids[idx % len(cuda_ids)])
+                            if device == "cuda"
+                            else None
+                        )
+                        futures.append(
+                            pool.submit(
+                                run_paper_chunk,
+                                project_root,
+                                retriever,
+                                cfg_abs,
+                                list(DATASET_SPLITS),
+                                ab_chunk,
+                                device,
+                                int(args.bootstrap),
+                                int(args.seed),
+                                int(args.randomization_trials),
+                                query_encoder_name,
+                                vis,
+                            )
+                        )
+                    for fut in as_completed(futures):
+                        partial = fut.result()
+                        _merge_chunk_results(bundle["results"][retriever], partial)
+
+        if not args.no_qtype_analysis:
+            logger.info(f"=== Question-type analysis | {retriever} ===")
+            bundle["question_type_analysis"][retriever] = run_qtype_analysis_for_retriever(
                 project_root,
                 retriever,
                 cfg_abs,
                 list(DATASET_SPLITS),
-                want,
                 device,
-                int(args.bootstrap),
-                int(args.seed),
-                int(args.randomization_trials),
                 query_encoder_name,
+                int(args.randomization_trials),
+                int(args.seed),
             )
-            _merge_chunk_results(bundle["results"][retriever], partial)
-            continue
-
-        ctx = mp.get_context("spawn")
-        futures = []
-        with ProcessPoolExecutor(max_workers=len(ablation_chunks), mp_context=ctx) as pool:
-            for idx, ab_chunk in enumerate(ablation_chunks):
-                vis = (
-                    str(cuda_ids[idx % len(cuda_ids)])
-                    if device == "cuda"
-                    else None
-                )
-                futures.append(
-                    pool.submit(
-                        run_paper_chunk,
-                        project_root,
-                        retriever,
-                        cfg_abs,
-                        list(DATASET_SPLITS),
-                        ab_chunk,
-                        device,
-                        int(args.bootstrap),
-                        int(args.seed),
-                        int(args.randomization_trials),
-                        query_encoder_name,
-                        vis,
-                    )
-                )
-            for fut in as_completed(futures):
-                partial = fut.result()
-                _merge_chunk_results(bundle["results"][retriever], partial)
 
     out_path = pathlib.Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +315,9 @@ def main() -> None:
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2)
     logger.success(f"Wrote {out_path}")
+
+    if bundle.get("question_type_analysis"):
+        print_question_type_summary(bundle["question_type_analysis"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+{
+  "retriever": "hybrid_spladepp_medcpt",
+  "created_utc": "2026-05-16T23:36:28.061685+00:00",
+  "best_ndcg10": 0.7102873612180352,
+  "epochs_completed": 10,
+  "train_path": "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_train_all.jsonl",
+  "dev_path": "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_dev_all.jsonl",
+  "query_emb_cache_path": "data/query_emb_cache_hybrid_spladepp_medcpt_train_all.pkl",
+  "epoch_logs_jsonl": "results/gardian_training/hybrid_spladepp_medcpt/epoch_logs.jsonl",
+  "epoch_logs_csv": "results/gardian_training/hybrid_spladepp_medcpt/epoch_logs.csv"
+}

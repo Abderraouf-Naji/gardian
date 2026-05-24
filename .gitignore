@@ -32,7 +32,7 @@ pip-wheel-metadata/
 # ----------------------
 # Project outputs
 # ----------------------
-results/
+# results/ is tracked on GitHub (checkpoints, metrics, plots).
 *.log
 gardian_server.log
 
@@ -43,9 +43,10 @@ data/
 hf_cache/
 umls_data/
 umls_data.zip
-# Large data files
+# Large data files (outside results/)
 *.jsonl
 *.pt
+!results/**/*.pt
 *.bin
 *.index
 *.faiss

@@ -1,0 +1,589 @@
+{
+  "meta": {
+    "created_utc": "2026-05-19T18:15:28.766387+00:00",
+    "script": "scripts/benchmark_retrieval_efficiency.py",
+    "device": "cuda",
+    "n_queries": 50,
+    "warmup": 5,
+    "per_dataset_indices": true
+  },
+  "index_sizes": {
+    "datasets": [
+      "pubmedqa_labeled",
+      "pubmedqa_artificial",
+      "medmcqa"
+    ],
+    "retrievers": {
+      "hybrid_bm25_faiss": {
+        "pubmedqa_labeled": {
+          "dataset": "pubmedqa_labeled",
+          "sparse_component": "bm25",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/bm25/pubmedqa_labeled",
+          "dense_path": "data/indices/faiss/pubmedqa_labeled",
+          "sparse_disk_bytes": 2677707,
+          "dense_disk_bytes": 11935719,
+          "total_disk_bytes": 14613426,
+          "sparse_disk_mb": 2.55,
+          "dense_disk_mb": 11.38,
+          "total_disk_mb": 13.94,
+          "sparse_disk_gb": 0.002,
+          "dense_disk_gb": 0.011,
+          "total_disk_gb": 0.014
+        },
+        "pubmedqa_artificial": {
+          "dataset": "pubmedqa_artificial",
+          "sparse_component": "bm25",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/bm25/pubmedqa_artificial",
+          "dense_path": "data/indices/faiss/pubmedqa_artificial",
+          "sparse_disk_bytes": 439408579,
+          "dense_disk_bytes": 2051502880,
+          "total_disk_bytes": 2490911459,
+          "sparse_disk_mb": 419.05,
+          "dense_disk_mb": 1956.47,
+          "total_disk_mb": 2375.52,
+          "sparse_disk_gb": 0.409,
+          "dense_disk_gb": 1.911,
+          "total_disk_gb": 2.32
+        },
+        "medmcqa": {
+          "dataset": "medmcqa",
+          "sparse_component": "bm25",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/bm25/medmcqa",
+          "dense_path": "data/indices/faiss/medmcqa",
+          "sparse_disk_bytes": 59969673,
+          "dense_disk_bytes": 194172575,
+          "total_disk_bytes": 254142248,
+          "sparse_disk_mb": 57.19,
+          "dense_disk_mb": 185.18,
+          "total_disk_mb": 242.37,
+          "sparse_disk_gb": 0.056,
+          "dense_disk_gb": 0.181,
+          "total_disk_gb": 0.237
+        }
+      },
+      "hybrid_bm25_medcpt": {
+        "pubmedqa_labeled": {
+          "dataset": "pubmedqa_labeled",
+          "sparse_component": "bm25",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/bm25/pubmedqa_labeled",
+          "dense_path": "data/indices/medcpt/pubmedqa_labeled",
+          "sparse_disk_bytes": 2677707,
+          "dense_disk_bytes": 6777914,
+          "total_disk_bytes": 9455621,
+          "sparse_disk_mb": 2.55,
+          "dense_disk_mb": 6.46,
+          "total_disk_mb": 9.02,
+          "sparse_disk_gb": 0.002,
+          "dense_disk_gb": 0.006,
+          "total_disk_gb": 0.009
+        },
+        "pubmedqa_artificial": {
+          "dataset": "pubmedqa_artificial",
+          "sparse_component": "bm25",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/bm25/pubmedqa_artificial",
+          "dense_path": "data/indices/medcpt/pubmedqa_artificial",
+          "sparse_disk_bytes": 439408579,
+          "dense_disk_bytes": 1175101299,
+          "total_disk_bytes": 1614509878,
+          "sparse_disk_mb": 419.05,
+          "dense_disk_mb": 1120.66,
+          "total_disk_mb": 1539.72,
+          "sparse_disk_gb": 0.409,
+          "dense_disk_gb": 1.094,
+          "total_disk_gb": 1.504
+        },
+        "medmcqa": {
+          "dataset": "medmcqa",
+          "sparse_component": "bm25",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/bm25/medmcqa",
+          "dense_path": "data/indices/medcpt/medmcqa",
+          "sparse_disk_bytes": 59969673,
+          "dense_disk_bytes": 115928818,
+          "total_disk_bytes": 175898491,
+          "sparse_disk_mb": 57.19,
+          "dense_disk_mb": 110.56,
+          "total_disk_mb": 167.75,
+          "sparse_disk_gb": 0.056,
+          "dense_disk_gb": 0.108,
+          "total_disk_gb": 0.164
+        }
+      },
+      "hybrid_spladepp_faiss": {
+        "pubmedqa_labeled": {
+          "dataset": "pubmedqa_labeled",
+          "sparse_component": "spladepp",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/spladepp/pubmedqa_labeled",
+          "dense_path": "data/indices/faiss/pubmedqa_labeled",
+          "sparse_disk_bytes": 7103941,
+          "dense_disk_bytes": 11935719,
+          "total_disk_bytes": 19039660,
+          "sparse_disk_mb": 6.77,
+          "dense_disk_mb": 11.38,
+          "total_disk_mb": 18.16,
+          "sparse_disk_gb": 0.007,
+          "dense_disk_gb": 0.011,
+          "total_disk_gb": 0.018
+        },
+        "pubmedqa_artificial": {
+          "dataset": "pubmedqa_artificial",
+          "sparse_component": "spladepp",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/spladepp/pubmedqa_artificial",
+          "dense_path": "data/indices/faiss/pubmedqa_artificial",
+          "sparse_disk_bytes": 1313187589,
+          "dense_disk_bytes": 2051502880,
+          "total_disk_bytes": 3364690469,
+          "sparse_disk_mb": 1252.35,
+          "dense_disk_mb": 1956.47,
+          "total_disk_mb": 3208.82,
+          "sparse_disk_gb": 1.223,
+          "dense_disk_gb": 1.911,
+          "total_disk_gb": 3.134
+        },
+        "medmcqa": {
+          "dataset": "medmcqa",
+          "sparse_component": "spladepp",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/spladepp/medmcqa",
+          "dense_path": "data/indices/faiss/medmcqa",
+          "sparse_disk_bytes": 133901893,
+          "dense_disk_bytes": 194172575,
+          "total_disk_bytes": 328074468,
+          "sparse_disk_mb": 127.7,
+          "dense_disk_mb": 185.18,
+          "total_disk_mb": 312.88,
+          "sparse_disk_gb": 0.125,
+          "dense_disk_gb": 0.181,
+          "total_disk_gb": 0.306
+        }
+      },
+      "hybrid_spladepp_medcpt": {
+        "pubmedqa_labeled": {
+          "dataset": "pubmedqa_labeled",
+          "sparse_component": "spladepp",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/spladepp/pubmedqa_labeled",
+          "dense_path": "data/indices/medcpt/pubmedqa_labeled",
+          "sparse_disk_bytes": 7103941,
+          "dense_disk_bytes": 6777914,
+          "total_disk_bytes": 13881855,
+          "sparse_disk_mb": 6.77,
+          "dense_disk_mb": 6.46,
+          "total_disk_mb": 13.24,
+          "sparse_disk_gb": 0.007,
+          "dense_disk_gb": 0.006,
+          "total_disk_gb": 0.013
+        },
+        "pubmedqa_artificial": {
+          "dataset": "pubmedqa_artificial",
+          "sparse_component": "spladepp",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/spladepp/pubmedqa_artificial",
+          "dense_path": "data/indices/medcpt/pubmedqa_artificial",
+          "sparse_disk_bytes": 1313187589,
+          "dense_disk_bytes": 1175101299,
+          "total_disk_bytes": 2488288888,
+          "sparse_disk_mb": 1252.35,
+          "dense_disk_mb": 1120.66,
+          "total_disk_mb": 2373.02,
+          "sparse_disk_gb": 1.223,
+          "dense_disk_gb": 1.094,
+          "total_disk_gb": 2.317
+        },
+        "medmcqa": {
+          "dataset": "medmcqa",
+          "sparse_component": "spladepp",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/spladepp/medmcqa",
+          "dense_path": "data/indices/medcpt/medmcqa",
+          "sparse_disk_bytes": 133901893,
+          "dense_disk_bytes": 115928818,
+          "total_disk_bytes": 249830711,
+          "sparse_disk_mb": 127.7,
+          "dense_disk_mb": 110.56,
+          "total_disk_mb": 238.26,
+          "sparse_disk_gb": 0.125,
+          "dense_disk_gb": 0.108,
+          "total_disk_gb": 0.233
+        }
+      }
+    }
+  },
+  "latency_ms": {
+    "hybrid_bm25_faiss": {
+      "pubmedqa_labeled": {
+        "dataset": "pubmedqa_labeled",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 1.109689541044645,
+          "p50_ms": 1.0857600063900463,
+          "p95_ms": 1.5267723967554045,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 27.45318938163109,
+          "p50_ms": 29.99741450912552,
+          "p95_ms": 36.96545970014995,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 26.229197579377797,
+          "p50_ms": 26.43672699923627,
+          "p95_ms": 34.78884129872313,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 39.3621995599824,
+          "p50_ms": 40.69040499598486,
+          "p95_ms": 52.687488552328425,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      },
+      "pubmedqa_artificial": {
+        "dataset": "pubmedqa_artificial",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 34.23614803963574,
+          "p50_ms": 31.905804506095592,
+          "p95_ms": 60.32481424554134,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 37.081216739316005,
+          "p50_ms": 37.55296449526213,
+          "p95_ms": 43.52485535418964,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 70.65526270016562,
+          "p50_ms": 67.81656200473662,
+          "p95_ms": 94.26734220687649,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 83.13905464136042,
+          "p50_ms": 86.96367850643583,
+          "p95_ms": 113.41067385146744,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      },
+      "medmcqa": {
+        "dataset": "medmcqa",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 3.821664500865154,
+          "p50_ms": 3.657899003883358,
+          "p95_ms": 5.720422651211265,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 32.79475492017809,
+          "p50_ms": 33.08344600372948,
+          "p95_ms": 38.31545905122766,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 39.94617635908071,
+          "p50_ms": 40.06033500627382,
+          "p95_ms": 47.40176694467662,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 46.89580895937979,
+          "p50_ms": 45.603736994962674,
+          "p95_ms": 58.16288735295529,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      }
+    },
+    "hybrid_bm25_medcpt": {
+      "pubmedqa_labeled": {
+        "dataset": "pubmedqa_labeled",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 1.148254919971805,
+          "p50_ms": 1.0752364905783907,
+          "p95_ms": 1.6609533486189316,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 36.50254938082071,
+          "p50_ms": 36.263432004489005,
+          "p95_ms": 45.670726399112006,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 32.73474628163967,
+          "p50_ms": 31.316098502429668,
+          "p95_ms": 43.43383015220751,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 45.49693462031428,
+          "p50_ms": 44.878063003125135,
+          "p95_ms": 59.07476180145749,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      },
+      "pubmedqa_artificial": {
+        "dataset": "pubmedqa_artificial",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 33.77228580066003,
+          "p50_ms": 31.466214000829495,
+          "p95_ms": 60.62099784685415,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 38.68011172162369,
+          "p50_ms": 39.165975504147355,
+          "p95_ms": 46.65467945378623,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 70.74390507827047,
+          "p50_ms": 69.78664499183651,
+          "p95_ms": 94.55078900136868,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 81.91587043955224,
+          "p50_ms": 83.25002149649663,
+          "p95_ms": 112.90156504983312,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      },
+      "medmcqa": {
+        "dataset": "medmcqa",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 3.9616657397709787,
+          "p50_ms": 3.7634270047419704,
+          "p95_ms": 5.796801998803858,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 32.269638620782644,
+          "p50_ms": 32.56211349798832,
+          "p95_ms": 44.264660043700125,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 35.49292639887426,
+          "p50_ms": 34.73682850017212,
+          "p95_ms": 52.47884819909814,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 43.53556479909457,
+          "p50_ms": 44.59120349929435,
+          "p95_ms": 64.09751664759824,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      }
+    },
+    "hybrid_spladepp_faiss": {
+      "pubmedqa_labeled": {
+        "dataset": "pubmedqa_labeled",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 24.72273815976223,
+          "p50_ms": 22.45616899745073,
+          "p95_ms": 33.37352015223587,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 30.741357639199123,
+          "p50_ms": 31.118297498323955,
+          "p95_ms": 37.014841740892734,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 51.10949580091983,
+          "p50_ms": 48.909789496974554,
+          "p95_ms": 67.41557325221947,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 61.4104650405352,
+          "p50_ms": 59.3689244997222,
+          "p95_ms": 79.21307134893141,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      },
+      "pubmedqa_artificial": {
+        "dataset": "pubmedqa_artificial",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 50.31634268088965,
+          "p50_ms": 46.72739400120918,
+          "p95_ms": 65.71202794875715,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 39.1323568392545,
+          "p50_ms": 36.72698000445962,
+          "p95_ms": 52.45131719639175,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 94.49620506085921,
+          "p50_ms": 90.63237600639695,
+          "p95_ms": 122.06510804753634,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 107.15431097982218,
+          "p50_ms": 105.46084649831755,
+          "p95_ms": 134.46908514015377,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      },
+      "medmcqa": {
+        "dataset": "medmcqa",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 26.82345653825905,
+          "p50_ms": 27.082235501438845,
+          "p95_ms": 36.823529547109494,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 30.544112200150266,
+          "p50_ms": 31.916814506985247,
+          "p95_ms": 37.31665945160785,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 55.8848499605665,
+          "p50_ms": 52.44597199634882,
+          "p95_ms": 70.75679645131459,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 67.41472968016751,
+          "p50_ms": 62.65504549082834,
+          "p95_ms": 90.23124515733798,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      }
+    },
+    "hybrid_spladepp_medcpt": {
+      "pubmedqa_labeled": {
+        "dataset": "pubmedqa_labeled",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 28.27043253928423,
+          "p50_ms": 28.741827998601366,
+          "p95_ms": 36.27206035598646,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 35.88435782090528,
+          "p50_ms": 35.77780699561117,
+          "p95_ms": 45.3434739029035,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 62.68044098018436,
+          "p50_ms": 64.02268999954686,
+          "p95_ms": 80.71845654339995,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 69.44900104048429,
+          "p50_ms": 69.86050950217759,
+          "p95_ms": 83.77039049228186,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      },
+      "pubmedqa_artificial": {
+        "dataset": "pubmedqa_artificial",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 49.7153441797127,
+          "p50_ms": 48.2684029993834,
+          "p95_ms": 62.602313147363006,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 37.316919999720994,
+          "p50_ms": 36.758346504939254,
+          "p95_ms": 44.168161953712115,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 90.1646078407066,
+          "p50_ms": 89.6044469991466,
+          "p95_ms": 100.33874595974339,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 100.69399983942276,
+          "p50_ms": 97.99704451143043,
+          "p95_ms": 117.12530774457261,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      },
+      "medmcqa": {
+        "dataset": "medmcqa",
+        "n_queries": 50,
+        "warmup": 5,
+        "sparse": {
+          "mean_ms": 26.325863119855057,
+          "p50_ms": 26.593032001983374,
+          "p95_ms": 34.52463519570301,
+          "n": 50
+        },
+        "dense": {
+          "mean_ms": 34.6492876400589,
+          "p50_ms": 34.929239001940005,
+          "p95_ms": 41.481445353565505,
+          "n": 50
+        },
+        "hybrid": {
+          "mean_ms": 62.64704013854498,
+          "p50_ms": 64.11313999706181,
+          "p95_ms": 77.22755855938884,
+          "n": 50
+        },
+        "gardian": {
+          "mean_ms": 71.68419608147815,
+          "p50_ms": 72.2935619924101,
+          "p95_ms": 91.14882890426087,
+          "n": 50,
+          "note": "adaptive retrieve only (rerank uses offline rank features)"
+        }
+      }
+    }
+  }
+}

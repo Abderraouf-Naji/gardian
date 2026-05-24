@@ -1,0 +1,168 @@
+{
+  "meta": {
+    "created_utc": "2026-05-23T12:19:25.278946+00:00",
+    "script": "scripts/14_compare_rerankers.py",
+    "retriever": "hybrid_spladepp_medcpt",
+    "device": "cuda",
+    "systems": [
+      "hybrid",
+      "rrf",
+      "cross_encoder_msmarco_minilm",
+      "cross_encoder_monot5_med",
+      "cross_encoder_monobert",
+      "gardian"
+    ],
+    "cross_encoder_variants": [
+      {
+        "tag": "msmarco_minilm",
+        "model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "backend": "st",
+        "result_key": "cross_encoder_msmarco_minilm"
+      },
+      {
+        "tag": "monot5_med",
+        "model": "castorini/monot5-base-med-msmarco",
+        "backend": "monot5",
+        "result_key": "cross_encoder_monot5_med"
+      },
+      {
+        "tag": "monobert",
+        "model": "castorini/monobert-large-msmarco",
+        "backend": "monobert",
+        "result_key": "cross_encoder_monobert"
+      }
+    ],
+    "datasets": [
+      "pubmedqa_labeled",
+      "medmcqa"
+    ],
+    "max_queries": 1000,
+    "args": {
+      "retriever": "hybrid_bm25_faiss,hybrid_spladepp_medcpt",
+      "datasets": "medmcqa",
+      "device": "cuda",
+      "output": null,
+      "skip_backfill": false,
+      "overwrite_ce": false,
+      "fast": true,
+      "eval_only": false,
+      "ce_tags": null,
+      "max_queries": 1000,
+      "cfg": "configs/base.yaml"
+    }
+  },
+  "results": {
+    "pubmedqa_labeled": {
+      "hybrid": {
+        "ndcg@10": 0.914068753563849,
+        "ndcg@20": 0.9300647314522803,
+        "ndcg@50": 0.9387304746857842,
+        "mrr": 0.9916183473389356,
+        "recall@10": 0.920557142857143,
+        "recall@20": 0.9636357142857144,
+        "hit@10": 0.999
+      },
+      "rrf": {
+        "ndcg@10": 0.9035531709364887,
+        "ndcg@20": 0.9217597235113744,
+        "ndcg@50": 0.9300569802428688,
+        "mrr": 0.9877694444444444,
+        "recall@10": 0.9146404761904762,
+        "recall@20": 0.9637357142857143,
+        "hit@10": 0.999
+      },
+      "gardian": {
+        "ndcg@10": 0.9234814899272923,
+        "ndcg@20": 0.9347927749407037,
+        "ndcg@50": 0.9424542678411315,
+        "mrr": 0.989800432900433,
+        "recall@10": 0.9357833333333333,
+        "recall@20": 0.9662785714285714,
+        "hit@10": 0.998
+      },
+      "cross_encoder_msmarco_minilm": {
+        "ndcg@10": 0.8577838541709546,
+        "ndcg@20": 0.874506471055663,
+        "ndcg@50": 0.8894279437172324,
+        "mrr": 0.9808431207622382,
+        "recall@10": 0.8564238095238095,
+        "recall@20": 0.901695238095238,
+        "hit@10": 0.994
+      },
+      "cross_encoder_monot5_med": {
+        "ndcg@10": 0.9120458817005513,
+        "ndcg@20": 0.9242366342861035,
+        "ndcg@50": 0.9343360114060747,
+        "mrr": 0.9869835122242099,
+        "recall@10": 0.9204809523809524,
+        "recall@20": 0.9526357142857143,
+        "hit@10": 0.997
+      },
+      "cross_encoder_monobert": {
+        "ndcg@10": 0.8836430877491396,
+        "ndcg@20": 0.8985580140168129,
+        "ndcg@50": 0.9112540534729423,
+        "mrr": 0.9847581282175032,
+        "recall@10": 0.8852809523809524,
+        "recall@20": 0.9257952380952381,
+        "hit@10": 0.996
+      }
+    },
+    "medmcqa": {
+      "hybrid": {
+        "ndcg@10": 0.429813932587478,
+        "ndcg@20": 0.445320652930935,
+        "ndcg@50": 0.45624205991741484,
+        "mrr": 0.37753770960458544,
+        "recall@10": 0.622,
+        "recall@20": 0.683,
+        "hit@10": 0.622
+      },
+      "rrf": {
+        "ndcg@10": 0.42349689748732694,
+        "ndcg@20": 0.4491431994786847,
+        "ndcg@50": 0.46501782726472707,
+        "mrr": 0.3622693909162891,
+        "recall@10": 0.652,
+        "recall@20": 0.754,
+        "hit@10": 0.652
+      },
+      "gardian": {
+        "ndcg@10": 0.46033615317035786,
+        "ndcg@20": 0.48076450780698315,
+        "ndcg@50": 0.4932068093796903,
+        "mrr": 0.4025908488535945,
+        "recall@10": 0.672,
+        "recall@20": 0.753,
+        "hit@10": 0.672
+      },
+      "cross_encoder_msmarco_minilm": {
+        "ndcg@10": 0.44881983723570934,
+        "ndcg@20": 0.47194955155907364,
+        "ndcg@50": 0.4876271667097825,
+        "mrr": 0.39892210226043845,
+        "recall@10": 0.638,
+        "recall@20": 0.729,
+        "hit@10": 0.638
+      },
+      "cross_encoder_monot5_med": {
+        "ndcg@10": 0.49462378049353817,
+        "ndcg@20": 0.5171386823001382,
+        "ndcg@50": 0.5287329458061728,
+        "mrr": 0.4373211951759832,
+        "recall@10": 0.704,
+        "recall@20": 0.792,
+        "hit@10": 0.704
+      },
+      "cross_encoder_monobert": {
+        "ndcg@10": 0.48114582371783965,
+        "ndcg@20": 0.5033796016946616,
+        "ndcg@50": 0.5187902882778573,
+        "mrr": 0.4272308345987962,
+        "recall@10": 0.683,
+        "recall@20": 0.769,
+        "hit@10": 0.683
+      }
+    }
+  }
+}

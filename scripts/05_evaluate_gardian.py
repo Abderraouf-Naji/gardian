@@ -1,16 +1,18 @@
 """
 ULTRA-FAST EVALUATION - Uses pre-generated rank data for ALL systems
 With CORRECTED MRR calculation
+
+Also reports Hit@k (success rate) when rank JSONL eval includes hit@ metrics.
 """
 
+import argparse
 import json
 import pathlib
-import sys
 import platform
 import subprocess
+import sys
 from datetime import datetime, timezone
-from typing import Any, Dict
-import argparse
+from typing import Any, Dict, List, Tuple
 
 import torch
 from loguru import logger
@@ -20,9 +22,10 @@ sys.path.insert(0, ".")
 
 from src.common.question_types import assert_cfg_question_types
 from src.common.rank_data_paths import normalize_retriever_name, resolve_rank_data_file
+from src.evaluation.baseline_systems import normalize_eval_results
 from src.evaluation.rank_jsonl_eval import evaluate_all_from_rank_data
 from src.evaluation.schemas import validate_evaluation_results
-from src.model.gardian import GARDIAN, build_gardian_from_model_cfg
+from src.model.gardian import GARDIAN, build_gardian_from_model_cfg, load_checkpoint_state
 
 torch.set_float32_matmul_precision("high")
 
@@ -63,7 +66,12 @@ def _load_component_metric_from_single_rankdata(
             f"Component rank data not found for {role}={component_retriever}: {component_path}"
         )
         return {}
-    component_results = evaluate_all_from_rank_data(component_path, model=None, device=None)
+    component_results = evaluate_all_from_rank_data(
+        component_path,
+        model=None,
+        device=None,
+        include_standalone_spladepp=False,
+    )
     metric_key = _metric_key_for_component(component_retriever, role)
     metric = component_results.get(metric_key, {})
     if not isinstance(metric, dict):
@@ -89,25 +97,38 @@ def _git_revision() -> str:
     return ""
 
 
-def build_model(cfg, device: str, retriever: str) -> GARDIAN:
+def build_model(cfg, device: str, retriever: str) -> Tuple[GARDIAN, int]:
     """Load trained GARDIAN model."""
     ckpt_path = pathlib.Path(cfg.paths.results_dir) / f"gardian_best_{retriever}.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-    
+
     # Load checkpoint weights on CPU first to avoid CUDA OOM spikes during deserialization.
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    ckpt_model_cfg = ckpt.get("cfg", {}).get("model") if isinstance(ckpt.get("cfg"), dict) else None
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt_cfg = ckpt.get("cfg", {}) if isinstance(ckpt.get("cfg"), dict) else {}
+    ckpt_model_cfg = ckpt_cfg.get("model") if isinstance(ckpt_cfg.get("model"), dict) else None
     model = build_gardian_from_model_cfg(ckpt_model_cfg or cfg.model)
-    model.load_state_dict(ckpt["model_state"])
+    load_checkpoint_state(model, ckpt["model_state"], strict=False)
     model.to(device)
     model.eval()
+    expected_qdim = int(
+        (ckpt_model_cfg or {}).get("query_feat_dim", cfg.model.query_feat_dim)
+    )
     logger.info(f"Loaded checkpoint for {retriever} from {ckpt_path}")
-    return model
+    return model, expected_qdim
 
 
-def print_results_table(dataset_name: str, results: Dict[str, Any], retriever: str):
-    """Print table: sparse, dense, hybrid, RRF, GARDIAN."""
+def _has_metric_block(results: Dict[str, Any], key: str) -> bool:
+    block = results.get(key)
+    return isinstance(block, dict) and "ndcg@10" in block
+
+
+def _results_row_specs(
+    results: Dict[str, Any],
+    retriever: str,
+    *,
+    include_cross_encoder: bool = True,
+) -> List[tuple[str, str, str]]:
     parts = SPARSE_DENSE_COMPONENTS.get(retriever, {"sparse": "bm25", "dense": "dense"})
     sparse_name = parts["sparse"]
     dense_name = parts["dense"]
@@ -116,16 +137,24 @@ def print_results_table(dataset_name: str, results: Dict[str, Any], retriever: s
         ("dense", "dense", f"dense({dense_name})"),
         ("hybrid", "hybrid", f"hybrid({sparse_name}+{dense_name})"),
         ("rrf", "rrf", f"rrf({sparse_name}+{dense_name})"),
-        ("gardian", "gardian", "gardian"),
     ]
-    print(f"\n{'='*100}")
+    if include_cross_encoder and _has_metric_block(results, "cross_encoder"):
+        row_specs.append(("cross_encoder", "cross_encoder", "cross_encoder"))
+    row_specs.append(("gardian", "gardian", "gardian"))
+    return row_specs
+
+
+def print_results_table(dataset_name: str, results: Dict[str, Any], retriever: str) -> None:
+    """Print table: sparse, dense, hybrid, RRF, GARDIAN (+ cross_encoder when scored)."""
+    row_specs = _results_row_specs(results, retriever)
+    print(f"\n{'=' * 100}")
     print(f"RESULTS FOR {dataset_name.upper()}")
-    print(f"{'='*100}")
+    print(f"{'=' * 100}")
     print(
         f"{'System':<24} {'nDCG@10':>10} {'nDCG@20':>10} {'nDCG@50':>10} {'nDCG@100':>10} "
         f"{'Recall@20':>11} {'Recall@50':>11} {'Recall@100':>12} {'MRR':>10}"
     )
-    print(f"{'-'*120}")
+    print(f"{'-' * 120}")
 
     for _, key, display_name in row_specs:
         m = results.get(key, {})
@@ -143,7 +172,29 @@ def print_results_table(dataset_name: str, results: Dict[str, Any], retriever: s
             f"{m.get('mrr', 0.0):>10.4f}"
         )
 
-    print(f"{'='*100}\n")
+    print(f"{'=' * 100}\n")
+
+
+def print_hit_results_table(dataset_name: str, results: Dict[str, Any], retriever: str) -> None:
+    """Additional table: Hit@k (fraction of queries with ≥1 relevant in top-k)."""
+    row_specs = _results_row_specs(results, retriever)
+    print(f"\n{'=' * 80}")
+    print(f"HIT RATE (Success@k) — {dataset_name.upper()}")
+    print(f"{'=' * 80}")
+    print(f"{'System':<24} {'Hit@5':>10} {'Hit@20':>10} {'Hit@50':>10}")
+    print(f"{'-' * 58}")
+
+    for _, key, display_name in row_specs:
+        m = results.get(key, {})
+        if not isinstance(m, dict):
+            m = {}
+        print(
+            f"{display_name:<24} "
+            f"{m.get('hit@5', 0.0):>10.4f} "
+            f"{m.get('hit@20', 0.0):>10.4f} "
+            f"{m.get('hit@50', 0.0):>10.4f}"
+        )
+    print(f"{'=' * 80}\n")
 
 
 def _metric(results: Dict[str, Any], system: str, metric_name: str) -> float:
@@ -174,15 +225,68 @@ def _baseline_label(system: str, retriever: str) -> str:
         return f"rrf({parts['sparse']}+{parts['dense']})"
     if system == "spladepp":
         return "spladepp"
+    if system == "cross_encoder":
+        return "cross_encoder"
     return system
+
+
+def _normalize_dataset_block(
+    raw: Dict[str, Any],
+    retriever: str,
+    *,
+    include_cross_encoder: bool,
+) -> Dict[str, Any]:
+    return normalize_eval_results(
+        raw,
+        retriever,
+        include_cross_encoder=include_cross_encoder,
+    )
+
+
+def _evaluation_output_suffix(use_cross_encoder_rank_data: bool) -> str:
+    return "_cross" if use_cross_encoder_rank_data else ""
+
+
+def _save_retriever_payload(
+    out_dir: pathlib.Path,
+    retriever: str,
+    ds_block: Dict[str, Any],
+    *,
+    include_cross_encoder: bool,
+    output_suffix: str,
+    args: argparse.Namespace,
+) -> pathlib.Path:
+    normalized = {
+        ds: _normalize_dataset_block(raw, retriever, include_cross_encoder=include_cross_encoder)
+        for ds, raw in ds_block.items()
+        if not str(ds).startswith("_")
+    }
+    per_path = out_dir / f"evaluation_{retriever}{output_suffix}.json"
+    per_payload = {
+        "meta": {
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "script": "scripts/05_evaluate_gardian.py",
+            "retriever": retriever,
+            "cross_encoder_rank_data": bool(include_cross_encoder),
+            "args": vars(args),
+            "git_revision": _git_revision(),
+        },
+        "results": {retriever: normalized},
+    }
+    validate_evaluation_results(per_payload)
+    with open(per_path, "w", encoding="utf-8") as pf:
+        json.dump(per_payload, pf, indent=2, default=str)
+    return per_path
 
 
 def _best_non_gardian_baseline(results: Dict[str, Any], retriever: str) -> tuple[str, float]:
     candidates = []
-    for system in ("bm25", "dense", "hybrid", "rrf", "spladepp"):
+    for system in ("bm25", "dense", "hybrid", "rrf", "spladepp", "cross_encoder"):
         block = results.get(system)
         if isinstance(block, dict) and "ndcg@10" in block:
-            candidates.append((_baseline_label(system, retriever), float(block.get("ndcg@10", 0.0) or 0.0)))
+            candidates.append(
+                (_baseline_label(system, retriever), float(block.get("ndcg@10", 0.0) or 0.0))
+            )
     if not candidates:
         return ("baseline", 0.0)
     return max(candidates, key=lambda x: x[1])
@@ -217,8 +321,35 @@ def main() -> None:
         type=str,
         default=None,
         help=(
-            "Output JSON path. If omitted, defaults to "
-            "results/evaluation_results_all_retrievers.json."
+            "Output JSON path. With --use-cross-encoder-rank-data and one retriever, "
+            "defaults to results/evaluation_{retriever}_cross.json."
+        ),
+    )
+    parser.add_argument(
+        "--per-retriever-json",
+        action="store_true",
+        help="Also write results/evaluation_{retriever}.json for each hybrid family.",
+    )
+    parser.add_argument(
+        "--print-hit-table",
+        action="store_true",
+        help="Print an additional Hit@k table after each dataset (requires hit@ in rank eval).",
+    )
+    parser.add_argument(
+        "--use-cross-encoder-rank-data",
+        action="store_true",
+        help=(
+            "Prefer rank JSONL files with a _ce suffix (from "
+            "scripts/13_backfill_cross_encoder_scores.py) when they exist."
+        ),
+    )
+    parser.add_argument(
+        "--datasets",
+        type=str,
+        default="all",
+        help=(
+            "Comma-separated datasets to evaluate: pubmedqa_labeled, "
+            "pubmedqa_artificial, medmcqa, or all (default all)."
         ),
     )
     args = parser.parse_args()
@@ -231,7 +362,7 @@ def main() -> None:
     else:
         device = args.device
     logger.info(f"Evaluation on: {device}")
-    
+
     retrievers = (
         ALL_EVAL_RETRIEVERS
         if args.retriever == "all"
@@ -245,8 +376,18 @@ def main() -> None:
         ("pubmedqa_artificial", "test"),
         ("medmcqa", "test"),
     ]
+    if args.datasets.strip().lower() != "all":
+        allowed = {d.strip() for d in args.datasets.split(",") if d.strip()}
+        dataset_splits = [ds for ds in dataset_splits if ds[0] in allowed]
+        if not dataset_splits:
+            raise SystemExit(f"No datasets matched --datasets {args.datasets!r}")
 
-    all_results = {}
+    all_results: Dict[str, Dict[str, Any]] = {}
+    out_dir = pathlib.Path(cfg.paths.results_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_suffix = _evaluation_output_suffix(args.use_cross_encoder_rank_data)
+    save_per_retriever = bool(args.per_retriever_json or args.use_cross_encoder_rank_data)
+
     for retriever in retrievers:
         retriever_desc = HYBRID_RETRIEVER_COMBINATIONS.get(retriever, "single retriever")
         logger.info("\n" + "=" * 72)
@@ -254,7 +395,16 @@ def main() -> None:
         logger.info("=" * 72)
 
         try:
-            model = build_model(cfg, device, retriever)
+            model, expected_qdim = build_model(cfg, device, retriever)
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower() and device == "cuda":
+                logger.warning("CUDA OOM loading GARDIAN; falling back to CPU for this run.")
+                device = "cpu"
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                model, expected_qdim = build_model(cfg, device, retriever)
+            else:
+                raise
         except FileNotFoundError as e:
             logger.warning(f"Skipping {retriever}: {e}")
             continue
@@ -262,14 +412,31 @@ def main() -> None:
         all_results[retriever] = {}
         for dataset_name, split in dataset_splits:
             rank_data_path = resolve_rank_data_file(retriever, dataset_name, split)
+            if args.use_cross_encoder_rank_data:
+                ce_path = pathlib.Path(rank_data_path).with_name(
+                    pathlib.Path(rank_data_path).stem + "_ce.jsonl"
+                )
+                if ce_path.exists():
+                    rank_data_path = str(ce_path)
+                    logger.info(f"Using cross-encoder rank data: {rank_data_path}")
+                else:
+                    logger.warning(
+                        f"No _ce rank file at {ce_path}; using default {rank_data_path}"
+                    )
             if not pathlib.Path(rank_data_path).exists():
                 logger.warning(f"Rank data not found: {rank_data_path}, skipping {dataset_name}")
                 continue
 
-            logger.info(f"\n{'='*60}")
+            logger.info(f"\n{'=' * 60}")
             logger.info(f"Evaluating: {dataset_name} ({retriever})")
             logger.info(f"Rank data: {rank_data_path}")
-            logger.info(f"{'='*60}")
+            logger.info(f"{'=' * 60}")
+
+            gardian_adaptive = bool(getattr(cfg.qa, "gardian_adaptive_retrieval", False))
+            if gardian_adaptive:
+                logger.info(
+                    "GARDIAN: adaptive retrieval ON (cfg.qa.gardian_adaptive_retrieval)"
+                )
 
             # Ultra-fast evaluation using pre-computed rank data
             try:
@@ -279,6 +446,10 @@ def main() -> None:
                     device,
                     query_encoder_name=str(cfg.encoder.model_name),
                     query_encoder_device="cpu",
+                    expected_query_feat_dim=expected_qdim,
+                    include_standalone_spladepp=False,
+                    gardian_adaptive_retrieval=gardian_adaptive,
+                    cfg=cfg,
                 )
             except RuntimeError as e:
                 if "out of memory" in str(e).lower() and device == "cuda":
@@ -294,6 +465,10 @@ def main() -> None:
                         "cpu",
                         query_encoder_name=str(cfg.encoder.model_name),
                         query_encoder_device="cpu",
+                        expected_query_feat_dim=expected_qdim,
+                        include_standalone_spladepp=False,
+                        gardian_adaptive_retrieval=gardian_adaptive,
+                        cfg=cfg,
                     )
                 else:
                     raise
@@ -319,14 +494,42 @@ def main() -> None:
 
             all_results[retriever][dataset_name] = results
 
-            # Print results table
+            # Print results table (original full metric table)
             print_results_table(f"{dataset_name} [{retriever}]", results, retriever)
-    
-    # Save all results
-    out_dir = pathlib.Path(cfg.paths.results_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = pathlib.Path(args.output) if args.output else (out_dir / "evaluation_results_all_retrievers.json")
+            if args.print_hit_table:
+                print_hit_results_table(f"{dataset_name} [{retriever}]", results, retriever)
+
+        if save_per_retriever and all_results.get(retriever):
+            per_path = _save_retriever_payload(
+                out_dir,
+                retriever,
+                all_results[retriever],
+                include_cross_encoder=args.use_cross_encoder_rank_data,
+                output_suffix=output_suffix,
+                args=args,
+            )
+            logger.info(f"Per-retriever metrics -> {per_path}")
+
+    # Save combined results (normalized keys for schema validation)
+    if args.output:
+        out_path = pathlib.Path(args.output)
+    elif len(retrievers) == 1:
+        out_path = out_dir / f"evaluation_{retrievers[0]}{output_suffix}.json"
+    else:
+        out_path = out_dir / f"evaluation_results_all_retrievers{output_suffix}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    normalized_all: Dict[str, Dict[str, Any]] = {}
+    for retriever, ds_block in all_results.items():
+        normalized_all[retriever] = {
+            ds: _normalize_dataset_block(
+                raw,
+                retriever,
+                include_cross_encoder=args.use_cross_encoder_rank_data,
+            )
+            for ds, raw in ds_block.items()
+            if not str(ds).startswith("_")
+        }
 
     payload = {
         "meta": {
@@ -337,18 +540,18 @@ def main() -> None:
             "platform": platform.platform(),
             "python_version": sys.version,
         },
-        "results": all_results,
+        "results": normalized_all,
     }
     validate_evaluation_results(payload)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, default=str)
-    
+
     logger.success(f"Results saved to {out_path}")
-    
+
     # Print final summary with analysis
-    print("\n" + "="*100)
+    print("\n" + "=" * 100)
     print("FINAL SUMMARY - nDCG@10 COMPARISON BY RETRIEVER")
-    print("="*100)
+    print("=" * 100)
 
     for retriever, retriever_results in all_results.items():
         print(f"\n[{retriever.upper()}]")
@@ -359,11 +562,19 @@ def main() -> None:
             gardian_mrr = _metric(dataset_results, "gardian", "mrr")
             best_label, best_baseline = _best_non_gardian_baseline(dataset_results, retriever)
             dense_label = _baseline_label("dense", retriever)
+            ce_ndcg10 = _metric(dataset_results, "cross_encoder", "ndcg@10")
+            ce_line = ""
+            if isinstance(dataset_results.get("cross_encoder"), dict):
+                ce_line = (
+                    f" | cross_encoder nDCG@10: {ce_ndcg10:.4f} | "
+                    f"Δ GARDIAN vs CE: {_delta_text(gardian_ndcg10, ce_ndcg10)}"
+                )
             print(
                 f"    GARDIAN nDCG@10: {gardian_ndcg10:.4f} | MRR: {gardian_mrr:.4f} | "
                 f"Δ vs {dense_label}: {_delta_text(gardian_ndcg10, dense_baseline)} | "
                 f"Δ vs best baseline ({best_label}={best_baseline:.4f}): "
                 f"{_delta_text(gardian_ndcg10, best_baseline)}"
+                f"{ce_line}"
             )
 
     # Cross-retriever comparison (GARDIAN only) per dataset
@@ -377,17 +588,23 @@ def main() -> None:
             r = all_results.get(retriever, {}).get(dataset_name, {})
             if not r:
                 continue
-            ranking.append((retriever, r.get("gardian", {}).get("ndcg@10", 0.0), r.get("gardian", {}).get("mrr", 0.0)))
+            ranking.append(
+                (
+                    retriever,
+                    r.get("gardian", {}).get("ndcg@10", 0.0),
+                    r.get("gardian", {}).get("mrr", 0.0),
+                )
+            )
         ranking.sort(key=lambda x: x[1], reverse=True)
         for retriever, ndcg10, mrr in ranking:
             print(f"  {retriever:10} nDCG@10: {ndcg10:.4f} | MRR: {mrr:.4f}")
-    
-    print("="*100)
-    
+
+    print("=" * 100)
+
     # Observations
-    print("\n" + "="*100)
+    print("\n" + "=" * 100)
     print("OBSERVATIONS & ANALYSIS")
-    print("="*100)
+    print("=" * 100)
 
 
 if __name__ == "__main__":

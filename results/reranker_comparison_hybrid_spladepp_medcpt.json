@@ -1,0 +1,109 @@
+{
+  "meta": {
+    "created_utc": "2026-05-23T09:58:19.831804+00:00",
+    "script": "scripts/14_compare_rerankers.py",
+    "retriever": "hybrid_spladepp_medcpt",
+    "device": "cuda",
+    "systems": [
+      "hybrid",
+      "rrf",
+      "cross_encoder_msmarco_minilm",
+      "cross_encoder_monot5_med",
+      "cross_encoder_monobert",
+      "gardian"
+    ],
+    "cross_encoder_variants": [
+      {
+        "tag": "msmarco_minilm",
+        "model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "backend": "st",
+        "result_key": "cross_encoder_msmarco_minilm"
+      },
+      {
+        "tag": "monot5_med",
+        "model": "castorini/monot5-base-med-msmarco",
+        "backend": "monot5",
+        "result_key": "cross_encoder_monot5_med"
+      },
+      {
+        "tag": "monobert",
+        "model": "castorini/monobert-large-msmarco",
+        "backend": "monobert",
+        "result_key": "cross_encoder_monobert"
+      }
+    ],
+    "datasets": [
+      "pubmedqa_labeled"
+    ],
+    "args": {
+      "retriever": "hybrid_spladepp_medcpt",
+      "datasets": "pubmedqa_labeled",
+      "device": "cuda",
+      "output": null,
+      "skip_backfill": false,
+      "overwrite_ce": false,
+      "fast": false,
+      "eval_only": false,
+      "ce_tags": null,
+      "cfg": "configs/base.yaml"
+    }
+  },
+  "results": {
+    "pubmedqa_labeled": {
+      "hybrid": {
+        "ndcg@10": 0.914068753563849,
+        "ndcg@20": 0.9300647314522803,
+        "ndcg@50": 0.9387304746857842,
+        "mrr": 0.9916183473389356,
+        "recall@10": 0.920557142857143,
+        "recall@20": 0.9636357142857143,
+        "hit@10": 0.999
+      },
+      "rrf": {
+        "ndcg@10": 0.9035531709364887,
+        "ndcg@20": 0.9217597235113744,
+        "ndcg@50": 0.9300569802428688,
+        "mrr": 0.9877694444444444,
+        "recall@10": 0.9146404761904762,
+        "recall@20": 0.9637357142857143,
+        "hit@10": 0.999
+      },
+      "gardian": {
+        "ndcg@10": 0.9234814899272923,
+        "ndcg@20": 0.9347927749407037,
+        "ndcg@50": 0.9424542678411317,
+        "mrr": 0.989800432900433,
+        "recall@10": 0.9357833333333333,
+        "recall@20": 0.9662785714285714,
+        "hit@10": 0.998
+      },
+      "cross_encoder_msmarco_minilm": {
+        "ndcg@10": 0.8577838541709546,
+        "ndcg@20": 0.874506471055663,
+        "ndcg@50": 0.8894279437172324,
+        "mrr": 0.9808431207622382,
+        "recall@10": 0.8564238095238095,
+        "recall@20": 0.901695238095238,
+        "hit@10": 0.994
+      },
+      "cross_encoder_monot5_med": {
+        "ndcg@10": 0.9118992737331477,
+        "ndcg@20": 0.9242195746939956,
+        "ndcg@50": 0.9344068961317257,
+        "mrr": 0.9869899224806202,
+        "recall@10": 0.9201476190476191,
+        "recall@20": 0.9526357142857143,
+        "hit@10": 0.997
+      },
+      "cross_encoder_monobert": {
+        "ndcg@10": 0.8836430877491396,
+        "ndcg@20": 0.8985601023384482,
+        "ndcg@50": 0.9111930067743116,
+        "mrr": 0.9847580224936637,
+        "recall@10": 0.8852809523809524,
+        "recall@20": 0.9257952380952381,
+        "hit@10": 0.996
+      }
+    }
+  }
+}

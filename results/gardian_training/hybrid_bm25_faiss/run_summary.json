@@ -1,0 +1,11 @@
+{
+  "retriever": "hybrid_bm25_faiss",
+  "created_utc": "2026-05-16T21:47:08.886640+00:00",
+  "best_ndcg10": 0.6831879055790274,
+  "epochs_completed": 9,
+  "train_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_train_all.jsonl",
+  "dev_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_dev_all.jsonl",
+  "query_emb_cache_path": "data/query_emb_cache_hybrid_bm25_faiss_train_all.pkl",
+  "epoch_logs_jsonl": "results/gardian_training/hybrid_bm25_faiss/epoch_logs.jsonl",
+  "epoch_logs_csv": "results/gardian_training/hybrid_bm25_faiss/epoch_logs.csv"
+}

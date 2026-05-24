@@ -5,8 +5,12 @@
 #       --index-url https://download.pytorch.org/whl/cu121
 torch>=2.1.0
 transformers>=4.41.0
+bitsandbytes>=0.43.0; sys_platform != "darwin"
 accelerate>=0.30.0
 sentence-transformers>=2.7.0
+# Required for MonoT5 / T5 cross-encoder tokenizers (AutoTokenizer falls back to tiktoken without it).
+sentencepiece>=0.2.0
+protobuf>=4.25.0
 
 # Datasets / hub.
 datasets>=2.18.0
@@ -14,6 +18,8 @@ huggingface_hub>=0.24.0
 
 # Retrieval.
 bm25s>=0.2.0
+# CPU build is enough: rank-data uses torch CUDA matmul when faiss-gpu is absent.
+# Optional native GPU: pip install faiss-gpu-cu12  OR  conda install -c conda-forge faiss-gpu
 faiss-cpu>=1.7.4
 
 # Graph & ML utilities.

@@ -1,0 +1,216 @@
+{
+  "meta": {
+    "created_utc": "2026-05-19T16:26:46.763027+00:00",
+    "script": "scripts/report_retrieval_index_sizes.py",
+    "note": "Disk footprint of per-dataset sparse + dense index directories."
+  },
+  "index_sizes": {
+    "datasets": [
+      "pubmedqa_labeled",
+      "pubmedqa_artificial",
+      "medmcqa"
+    ],
+    "retrievers": {
+      "hybrid_bm25_faiss": {
+        "pubmedqa_labeled": {
+          "dataset": "pubmedqa_labeled",
+          "sparse_component": "bm25",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/bm25/pubmedqa_labeled",
+          "dense_path": "data/indices/faiss/pubmedqa_labeled",
+          "sparse_disk_bytes": 2677707,
+          "dense_disk_bytes": 11935719,
+          "total_disk_bytes": 14613426,
+          "sparse_disk_mb": 2.55,
+          "dense_disk_mb": 11.38,
+          "total_disk_mb": 13.94,
+          "sparse_disk_gb": 0.002,
+          "dense_disk_gb": 0.011,
+          "total_disk_gb": 0.014
+        },
+        "pubmedqa_artificial": {
+          "dataset": "pubmedqa_artificial",
+          "sparse_component": "bm25",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/bm25/pubmedqa_artificial",
+          "dense_path": "data/indices/faiss/pubmedqa_artificial",
+          "sparse_disk_bytes": 439408579,
+          "dense_disk_bytes": 2051502880,
+          "total_disk_bytes": 2490911459,
+          "sparse_disk_mb": 419.05,
+          "dense_disk_mb": 1956.47,
+          "total_disk_mb": 2375.52,
+          "sparse_disk_gb": 0.409,
+          "dense_disk_gb": 1.911,
+          "total_disk_gb": 2.32
+        },
+        "medmcqa": {
+          "dataset": "medmcqa",
+          "sparse_component": "bm25",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/bm25/medmcqa",
+          "dense_path": "data/indices/faiss/medmcqa",
+          "sparse_disk_bytes": 59969673,
+          "dense_disk_bytes": 194172575,
+          "total_disk_bytes": 254142248,
+          "sparse_disk_mb": 57.19,
+          "dense_disk_mb": 185.18,
+          "total_disk_mb": 242.37,
+          "sparse_disk_gb": 0.056,
+          "dense_disk_gb": 0.181,
+          "total_disk_gb": 0.237
+        }
+      },
+      "hybrid_bm25_medcpt": {
+        "pubmedqa_labeled": {
+          "dataset": "pubmedqa_labeled",
+          "sparse_component": "bm25",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/bm25/pubmedqa_labeled",
+          "dense_path": "data/indices/medcpt/pubmedqa_labeled",
+          "sparse_disk_bytes": 2677707,
+          "dense_disk_bytes": 6777914,
+          "total_disk_bytes": 9455621,
+          "sparse_disk_mb": 2.55,
+          "dense_disk_mb": 6.46,
+          "total_disk_mb": 9.02,
+          "sparse_disk_gb": 0.002,
+          "dense_disk_gb": 0.006,
+          "total_disk_gb": 0.009
+        },
+        "pubmedqa_artificial": {
+          "dataset": "pubmedqa_artificial",
+          "sparse_component": "bm25",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/bm25/pubmedqa_artificial",
+          "dense_path": "data/indices/medcpt/pubmedqa_artificial",
+          "sparse_disk_bytes": 439408579,
+          "dense_disk_bytes": 1175101299,
+          "total_disk_bytes": 1614509878,
+          "sparse_disk_mb": 419.05,
+          "dense_disk_mb": 1120.66,
+          "total_disk_mb": 1539.72,
+          "sparse_disk_gb": 0.409,
+          "dense_disk_gb": 1.094,
+          "total_disk_gb": 1.504
+        },
+        "medmcqa": {
+          "dataset": "medmcqa",
+          "sparse_component": "bm25",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/bm25/medmcqa",
+          "dense_path": "data/indices/medcpt/medmcqa",
+          "sparse_disk_bytes": 59969673,
+          "dense_disk_bytes": 115928818,
+          "total_disk_bytes": 175898491,
+          "sparse_disk_mb": 57.19,
+          "dense_disk_mb": 110.56,
+          "total_disk_mb": 167.75,
+          "sparse_disk_gb": 0.056,
+          "dense_disk_gb": 0.108,
+          "total_disk_gb": 0.164
+        }
+      },
+      "hybrid_spladepp_faiss": {
+        "pubmedqa_labeled": {
+          "dataset": "pubmedqa_labeled",
+          "sparse_component": "spladepp",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/spladepp/pubmedqa_labeled",
+          "dense_path": "data/indices/faiss/pubmedqa_labeled",
+          "sparse_disk_bytes": 7103941,
+          "dense_disk_bytes": 11935719,
+          "total_disk_bytes": 19039660,
+          "sparse_disk_mb": 6.77,
+          "dense_disk_mb": 11.38,
+          "total_disk_mb": 18.16,
+          "sparse_disk_gb": 0.007,
+          "dense_disk_gb": 0.011,
+          "total_disk_gb": 0.018
+        },
+        "pubmedqa_artificial": {
+          "dataset": "pubmedqa_artificial",
+          "sparse_component": "spladepp",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/spladepp/pubmedqa_artificial",
+          "dense_path": "data/indices/faiss/pubmedqa_artificial",
+          "sparse_disk_bytes": 1313187589,
+          "dense_disk_bytes": 2051502880,
+          "total_disk_bytes": 3364690469,
+          "sparse_disk_mb": 1252.35,
+          "dense_disk_mb": 1956.47,
+          "total_disk_mb": 3208.82,
+          "sparse_disk_gb": 1.223,
+          "dense_disk_gb": 1.911,
+          "total_disk_gb": 3.134
+        },
+        "medmcqa": {
+          "dataset": "medmcqa",
+          "sparse_component": "spladepp",
+          "dense_component": "faiss",
+          "sparse_path": "data/indices/spladepp/medmcqa",
+          "dense_path": "data/indices/faiss/medmcqa",
+          "sparse_disk_bytes": 133901893,
+          "dense_disk_bytes": 194172575,
+          "total_disk_bytes": 328074468,
+          "sparse_disk_mb": 127.7,
+          "dense_disk_mb": 185.18,
+          "total_disk_mb": 312.88,
+          "sparse_disk_gb": 0.125,
+          "dense_disk_gb": 0.181,
+          "total_disk_gb": 0.306
+        }
+      },
+      "hybrid_spladepp_medcpt": {
+        "pubmedqa_labeled": {
+          "dataset": "pubmedqa_labeled",
+          "sparse_component": "spladepp",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/spladepp/pubmedqa_labeled",
+          "dense_path": "data/indices/medcpt/pubmedqa_labeled",
+          "sparse_disk_bytes": 7103941,
+          "dense_disk_bytes": 6777914,
+          "total_disk_bytes": 13881855,
+          "sparse_disk_mb": 6.77,
+          "dense_disk_mb": 6.46,
+          "total_disk_mb": 13.24,
+          "sparse_disk_gb": 0.007,
+          "dense_disk_gb": 0.006,
+          "total_disk_gb": 0.013
+        },
+        "pubmedqa_artificial": {
+          "dataset": "pubmedqa_artificial",
+          "sparse_component": "spladepp",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/spladepp/pubmedqa_artificial",
+          "dense_path": "data/indices/medcpt/pubmedqa_artificial",
+          "sparse_disk_bytes": 1313187589,
+          "dense_disk_bytes": 1175101299,
+          "total_disk_bytes": 2488288888,
+          "sparse_disk_mb": 1252.35,
+          "dense_disk_mb": 1120.66,
+          "total_disk_mb": 2373.02,
+          "sparse_disk_gb": 1.223,
+          "dense_disk_gb": 1.094,
+          "total_disk_gb": 2.317
+        },
+        "medmcqa": {
+          "dataset": "medmcqa",
+          "sparse_component": "spladepp",
+          "dense_component": "medcpt",
+          "sparse_path": "data/indices/spladepp/medmcqa",
+          "dense_path": "data/indices/medcpt/medmcqa",
+          "sparse_disk_bytes": 133901893,
+          "dense_disk_bytes": 115928818,
+          "total_disk_bytes": 249830711,
+          "sparse_disk_mb": 127.7,
+          "dense_disk_mb": 110.56,
+          "total_disk_mb": 238.26,
+          "sparse_disk_gb": 0.125,
+          "dense_disk_gb": 0.108,
+          "total_disk_gb": 0.233
+        }
+      }
+    }
+  }
+}

@@ -59,18 +59,16 @@ from tqdm import tqdm
 
 sys.path.insert(0, ".")
 
-from src.features.dense_feat import (
-    compute_dense_features_with_score,
-)
-from src.features.kg_feat import (
-    build_degree_lookup,
-    build_node_set,
-    build_query_kg_cache,
-    compute_kg_features,
-)
+from src.common.query_emb_cache import save_query_emb_cache
+from src.features.dense_feat import compute_dense_features_with_score
 from src.features.sparse import compute_sparse_features
-from src.kg.builder import load_kg
-from src.kg.linker import EntityLinker
+from src.pipeline.rank_dense_features import (
+    FaissPassageEmbeddingLookup,
+    MedCPTFeatureEncoder,
+    dense_embedding_pair_for_candidates,
+    uses_faiss_dense,
+    uses_medcpt_dense,
+)
 from src.retrieval.bm25 import BM25Retriever
 from src.retrieval.dense import DenseRetriever
 from src.retrieval.hybrid import (
@@ -84,11 +82,24 @@ from src.retrieval.spladepp import SpladePPRetriever
 from src.retrieval.medcpt import MedCPTRetriever
 from src.common.question_types import normalize_question_type, qtype_onehot
 from src.common.rank_data_paths import normalize_retriever_name, rank_data_file
+from src.retrieval.faiss_util import faiss_gpu_available
 
 
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
+
+def _faiss_kwargs(cfg, device: str, args) -> Dict:
+    use_gpu = bool(cfg.retrieval.get("faiss_use_gpu", True))
+    if getattr(args, "no_faiss_gpu", False):
+        use_gpu = False
+    if getattr(args, "faiss_gpu", False):
+        use_gpu = True
+    return {
+        "device": device,
+        "use_faiss_gpu": use_gpu and device == "cuda",
+        "faiss_gpu_id": int(cfg.retrieval.get("faiss_gpu_id", 0)),
+    }
 
 # Dataset configurations
 DATASETS = {
@@ -223,26 +234,20 @@ def query_cache_file(retriever: str, dataset: str, split: str) -> str:
     return str(pathlib.Path("data") / f"query_emb_cache_{r}_{dataset}_{split}.pkl")
 
 
-def merge_query_caches(src_paths: List[str], out_path: str) -> int:
+def merge_query_caches(
+    src_paths: List[str],
+    out_path: str,
+    *,
+    expected_dim: Optional[int] = None,
+) -> int:
     merged: Dict[str, List[float]] = {}
     for p in src_paths:
-        pp = pathlib.Path(p)
-        if not pp.is_file():
-            continue
-        try:
-            with pp.open("rb") as f:
-                obj = pickle.load(f)
-            if isinstance(obj, dict):
-                merged.update({str(k): v for k, v in obj.items()})
-        except Exception as e:
-            logger.warning(f"Skipping bad query cache {pp}: {e}")
+        from src.common.query_emb_cache import load_query_emb_cache
+
+        merged.update(load_query_emb_cache(p, expected_dim=expected_dim))
     if not merged:
         return 0
-    op = pathlib.Path(out_path)
-    op.parent.mkdir(parents=True, exist_ok=True)
-    with op.open("wb") as f:
-        pickle.dump(merged, f, protocol=pickle.HIGHEST_PROTOCOL)
-    logger.info(f"Merged query cache -> {op} ({len(merged):,} qids)")
+    save_query_emb_cache(out_path, merged, expected_dim=expected_dim)
     return len(merged)
 
 # -----------------------------------------------------------------------------
@@ -260,7 +265,7 @@ def _index_paths(dataset_key: str) -> Dict[str, pathlib.Path]:
     }
 
 
-def get_hybrid_retriever(dataset_key: str, cfg) -> HybridBm25FaissRetriever:
+def get_hybrid_retriever(dataset_key: str, cfg, **dense_kw) -> HybridBm25FaissRetriever:
     """Create hybrid retriever (BM25 + FAISS)."""
     paths = _index_paths(dataset_key)
     bm25_dir = paths["bm25_dir"]
@@ -279,8 +284,9 @@ def get_hybrid_retriever(dataset_key: str, cfg) -> HybridBm25FaissRetriever:
         encoder_name=cfg.encoder.model_name,
         batch_size=int(cfg.encoder.batch_size),
         max_length=int(cfg.encoder.max_length),
+        **dense_kw,
     )
-    
+
     return HybridBm25FaissRetriever(
         bm25=bm25,
         dense=dense,
@@ -297,7 +303,7 @@ def get_bm25_retriever(dataset_key: str, cfg) -> BM25Retriever:
     return BM25Retriever(index_dir=str(bm25_dir))
 
 
-def get_faiss_retriever(dataset_key: str, cfg) -> DenseRetriever:
+def get_faiss_retriever(dataset_key: str, cfg, **dense_kw) -> DenseRetriever:
     paths = _index_paths(dataset_key)
     faiss_path = paths["faiss_path"]
     meta_path = paths["faiss_meta"]
@@ -309,10 +315,11 @@ def get_faiss_retriever(dataset_key: str, cfg) -> DenseRetriever:
         encoder_name=cfg.encoder.model_name,
         batch_size=int(cfg.encoder.batch_size),
         max_length=int(cfg.encoder.max_length),
+        **dense_kw,
     )
 
 
-def get_spladepp_retriever(dataset_key: str, cfg) -> SpladePPRetriever:
+def get_spladepp_retriever(dataset_key: str, cfg, device: str = "cuda") -> SpladePPRetriever:
     paths = _index_paths(dataset_key)
     splade_dir = paths["spladepp_dir"]
     if not SpladePPRetriever.index_ready(str(splade_dir)):
@@ -324,13 +331,13 @@ def get_spladepp_retriever(dataset_key: str, cfg) -> SpladePPRetriever:
                 "spladepp_encoder", "naver/splade-cocondenser-ensembledistil"
             )
         ),
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device=device,
         batch_size=int(cfg.retrieval.get("spladepp_batch_size", 64)),
         max_length=int(cfg.retrieval.get("spladepp_max_length", 256)),
     )
 
 
-def get_medcpt_retriever(dataset_key: str, cfg) -> MedCPTRetriever:
+def get_medcpt_retriever(dataset_key: str, cfg, device: str = "cuda") -> MedCPTRetriever:
     paths = _index_paths(dataset_key)
     medcpt_dir = paths["medcpt_dir"]
     if not MedCPTRetriever.index_ready(str(medcpt_dir)):
@@ -343,21 +350,23 @@ def get_medcpt_retriever(dataset_key: str, cfg) -> MedCPTRetriever:
         query_encoder=str(
             cfg.retrieval.get("medcpt_query_encoder", "ncbi/MedCPT-Query-Encoder")
         ),
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device=device,
         batch_size=int(cfg.retrieval.get("medcpt_batch_size", 256)),
         max_length=int(cfg.retrieval.get("medcpt_max_length", 512)),
     )
 
 
-def get_hybrid_spladepp_medcpt_retriever(dataset_key: str, cfg) -> DualHybridRetriever:
+def get_hybrid_spladepp_medcpt_retriever(
+    dataset_key: str, cfg, *, device: str = "cuda"
+) -> DualHybridRetriever:
     """Create hybrid retriever (SPLADE++ + MedCPT)."""
     paths = _index_paths(dataset_key)
     if not SpladePPRetriever.index_ready(str(paths["spladepp_dir"])):
         raise FileNotFoundError(f"SPLADE++ index not found/ready: {paths['spladepp_dir']}")
     if not MedCPTRetriever.index_ready(str(paths["medcpt_dir"])):
         raise FileNotFoundError(f"MedCPT index not found/ready: {paths['medcpt_dir']}")
-    spladepp = get_spladepp_retriever(dataset_key, cfg)
-    medcpt = get_medcpt_retriever(dataset_key, cfg)
+    spladepp = get_spladepp_retriever(dataset_key, cfg, device=device)
+    medcpt = get_medcpt_retriever(dataset_key, cfg, device=device)
     return HybridSpladePPMedcptRetriever(
         spladepp=spladepp,
         medcpt=medcpt,
@@ -366,7 +375,9 @@ def get_hybrid_spladepp_medcpt_retriever(dataset_key: str, cfg) -> DualHybridRet
     )
 
 
-def get_hybrid_bm25_medcpt_retriever(dataset_key: str, cfg) -> DualHybridRetriever:
+def get_hybrid_bm25_medcpt_retriever(
+    dataset_key: str, cfg, *, device: str = "cuda"
+) -> DualHybridRetriever:
     """Create hybrid retriever (BM25 + MedCPT)."""
     paths = _index_paths(dataset_key)
     if not (paths["bm25_dir"] / "index.pkl").exists():
@@ -374,7 +385,7 @@ def get_hybrid_bm25_medcpt_retriever(dataset_key: str, cfg) -> DualHybridRetriev
     if not MedCPTRetriever.index_ready(str(paths["medcpt_dir"])):
         raise FileNotFoundError(f"MedCPT index not found/ready: {paths['medcpt_dir']}")
     bm25 = get_bm25_retriever(dataset_key, cfg)
-    medcpt = get_medcpt_retriever(dataset_key, cfg)
+    medcpt = get_medcpt_retriever(dataset_key, cfg, device=device)
     return HybridBm25MedcptRetriever(
         bm25=bm25,
         medcpt=medcpt,
@@ -383,15 +394,19 @@ def get_hybrid_bm25_medcpt_retriever(dataset_key: str, cfg) -> DualHybridRetriev
     )
 
 
-def get_hybrid_spladepp_faiss_retriever(dataset_key: str, cfg) -> DualHybridRetriever:
+def get_hybrid_spladepp_faiss_retriever(
+    dataset_key: str, cfg, **dense_kw
+) -> DualHybridRetriever:
     """Create hybrid retriever (SPLADE++ + FAISS)."""
     paths = _index_paths(dataset_key)
     if not SpladePPRetriever.index_ready(str(paths["spladepp_dir"])):
         raise FileNotFoundError(f"SPLADE++ index not found/ready: {paths['spladepp_dir']}")
     if not paths["faiss_path"].exists():
         raise FileNotFoundError(f"FAISS index not found: {paths['faiss_path']}")
-    spladepp = get_spladepp_retriever(dataset_key, cfg)
-    dense = get_faiss_retriever(dataset_key, cfg)
+    spladepp = get_spladepp_retriever(
+        dataset_key, cfg, device=str(dense_kw.get("device", "cuda"))
+    )
+    dense = get_faiss_retriever(dataset_key, cfg, **dense_kw)
     return HybridSpladePPFaissRetriever(
         spladepp=spladepp,
         dense=dense,
@@ -402,25 +417,33 @@ def get_hybrid_spladepp_faiss_retriever(dataset_key: str, cfg) -> DualHybridRetr
     )
 
 
-def get_retriever(dataset_key: str, cfg, retriever_type: str = "hybrid_bm25_faiss"):
+def get_retriever(
+    dataset_key: str,
+    cfg,
+    retriever_type: str = "hybrid_bm25_faiss",
+    *,
+    device: str = "cuda",
+    dense_kw: Optional[Dict] = None,
+):
     """Factory function to get the appropriate retriever."""
     retriever_type = normalize_retriever_name(retriever_type)
+    dk = dict(dense_kw or {})
     if retriever_type == "bm25":
         return get_bm25_retriever(dataset_key, cfg)
     elif retriever_type == "faiss":
-        return get_faiss_retriever(dataset_key, cfg)
+        return get_faiss_retriever(dataset_key, cfg, **dk)
     elif retriever_type == "spladepp":
-        return get_spladepp_retriever(dataset_key, cfg)
+        return get_spladepp_retriever(dataset_key, cfg, device=device)
     elif retriever_type == "medcpt":
-        return get_medcpt_retriever(dataset_key, cfg)
+        return get_medcpt_retriever(dataset_key, cfg, device=device)
     elif retriever_type == "hybrid_bm25_faiss":
-        return get_hybrid_retriever(dataset_key, cfg)
+        return get_hybrid_retriever(dataset_key, cfg, **dk)
     elif retriever_type == "hybrid_bm25_medcpt":
-        return get_hybrid_bm25_medcpt_retriever(dataset_key, cfg)
+        return get_hybrid_bm25_medcpt_retriever(dataset_key, cfg, device=device)
     elif retriever_type == "hybrid_spladepp_faiss":
-        return get_hybrid_spladepp_faiss_retriever(dataset_key, cfg)
+        return get_hybrid_spladepp_faiss_retriever(dataset_key, cfg, **dk)
     elif retriever_type == "hybrid_spladepp_medcpt":
-        return get_hybrid_spladepp_medcpt_retriever(dataset_key, cfg)
+        return get_hybrid_spladepp_medcpt_retriever(dataset_key, cfg, device=device)
     else:
         raise ValueError(f"Unknown retriever type: {retriever_type}")
 
@@ -428,8 +451,8 @@ def get_retriever(dataset_key: str, cfg, retriever_type: str = "hybrid_bm25_fais
 # Query Processing
 # -----------------------------------------------------------------------------
 
-def compute_query_bundle(question: str, qtype: str, encoder, linker) -> Dict:
-    """Compute query embeddings and KG entities."""
+def compute_query_bundle(question: str, qtype: str, encoder) -> Dict:
+    """PubMedBERT query embedding for the GARDIAN controller (768-d)."""
     q_emb = encoder.encode(
         [question],
         batch_size=1,
@@ -437,14 +460,9 @@ def compute_query_bundle(question: str, qtype: str, encoder, linker) -> Dict:
         show_progress_bar=False,
         convert_to_numpy=True,
     )[0]
-    q_entities = linker.link(question)
-    kg_coverage = 1.0 if len(q_entities) > 0 else 0.0
-
     return {
         "query_emb": q_emb,
-        "q_entities": q_entities,
         "qtype_onehot": qtype_onehot(qtype),
-        "kg_coverage": kg_coverage,
     }
 
 def process_queries(
@@ -453,25 +471,15 @@ def process_queries(
     retriever,
     retriever_type: str,
     encoder,
-    linker,
-    kg,
-    degree_lookup: Dict,
-    node_set: frozenset,
     idf_table: Optional[Dict[str, float]] = None,
     max_candidates: int = 400,
     max_queries: Optional[int] = None,
     expected_query_feat_dim: Optional[int] = None,
     lean_records: bool = False,
     query_cache_out_path: Optional[str] = None,
-    # Default to the correctness-first path:
-    # we need the passage embedding to compute mean/max |q_emb - p_emb|.
-    # The "dense_from_retriever_scores" fast path intentionally zero-fills
-    # those two dims and is only safe for speed ablations.
     dense_from_retriever_scores: bool = False,
-    exact_distance_features: bool = False,
-    kg_max_path: int = 4,
-    kg_refine_top_n: int = 0,
-    passage_entity_cache_max: Optional[int] = 150_000,
+    faiss_lookup: Optional[FaissPassageEmbeddingLookup] = None,
+    medcpt_encoder: Optional[MedCPTFeatureEncoder] = None,
 ) -> None:
     """Process queries and generate ranking data."""
     pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -488,15 +496,6 @@ def process_queries(
     skipped_no_gold = 0
     no_positive_in_pool = 0
     qtype_counter = Counter()
-    passage_entity_cache: OrderedDict = OrderedDict()
-    pec_max = (
-        None
-        if passage_entity_cache_max is None or int(passage_entity_cache_max) <= 0
-        else int(passage_entity_cache_max)
-    )
-    # Quick scale diagnostics to detect feature dominance / collapse.
-    kg_l1_sum = 0.0
-    kg_feat_abs_sum = np.zeros(6, dtype=np.float64)
     dense_l1_sum = 0.0
     sparse_l1_sum = 0.0
     diag_samples = 0
@@ -527,7 +526,7 @@ def process_queries(
                 continue
 
             # Compute query bundle
-            qb = compute_query_bundle(question, qtype, encoder, linker)
+            qb = compute_query_bundle(question, qtype, encoder)
             q_emb = qb["query_emb"]
             if query_cache_out_path and qid not in qid_emb_cache:
                 qid_emb_cache[str(qid)] = q_emb.tolist()
@@ -536,38 +535,7 @@ def process_queries(
                     f"query_emb dim mismatch for qid={qid}: got={int(q_emb.shape[0])} "
                     f"expected={int(expected_query_feat_dim)}"
                 )
-            q_entities = qb["q_entities"]
             qtype_oh = qb["qtype_onehot"]
-            kg_coverage = qb["kg_coverage"]
-
-            # Build query KG caches:
-            # - base: always cheap (no BFS distance map)
-            # - exact: optional per-query BFS map used only for top-N candidates
-            query_kg_cache_base = build_query_kg_cache(
-                q_entities,
-                kg,
-                node_set=node_set,
-                compute_distances=False,
-                max_path=int(kg_max_path),
-            )
-            use_refine = (
-                int(kg_refine_top_n) > 0
-                and retriever_type in {
-                    "hybrid_bm25_faiss",
-                    "hybrid_bm25_medcpt",
-                    "hybrid_spladepp_faiss",
-                    "hybrid_spladepp_medcpt",
-                }
-            )
-            query_kg_cache_exact = None
-            if bool(exact_distance_features) or use_refine:
-                query_kg_cache_exact = build_query_kg_cache(
-                    q_entities,
-                    kg,
-                    node_set=node_set,
-                    compute_distances=True,
-                    max_path=int(kg_max_path),
-                )
 
             # Active dense score used by the dense branch. For FAISS hybrids it
             # is the FAISS/PubMedBERT score; for MedCPT hybrids it is the
@@ -598,19 +566,16 @@ def process_queries(
             dense_score_mean = float(np.mean(active_dense_scores))
             dense_score_std = float(np.std(active_dense_scores) + 1e-8)
 
-            p_embs = None
+            q_dense = None
+            p_embs: List[np.ndarray] = []
             if not use_dense_scores:
-                # Original dense feature path: encode passages with sentence encoder.
-                # The active dense retriever score remains feature [0]; the
-                # encoded passages supply mean/max |q-p| so the branch is still
-                # a full 4-dim dense semantic feature vector.
-                p_texts = [c.get("text", "") for c in candidates]
-                p_embs = encoder.encode(
-                    p_texts,
-                    batch_size=512,
-                    normalize_embeddings=True,
-                    show_progress_bar=False,
-                    convert_to_numpy=True,
+                q_dense, p_embs = dense_embedding_pair_for_candidates(
+                    retriever_type=retriever_type,
+                    question=question,
+                    candidates=candidates,
+                    pubmedbert_encoder=encoder,
+                    faiss_lookup=faiss_lookup,
+                    medcpt_encoder=medcpt_encoder,
                 )
 
             # Process each candidate
@@ -647,19 +612,6 @@ def process_queries(
                 elif retriever_type == "spladepp":
                     spladepp_score = float(cand.get("score", cand.get("spladepp_score", 0.0)))
                 
-                # Get or compute passage entities (bounded LRU to cap RAM on long runs)
-                if pid in passage_entity_cache:
-                    _lru_touch(passage_entity_cache, pid, pec_max)
-                    p_entities = passage_entity_cache[pid]
-                else:
-                    _lru_put(
-                        passage_entity_cache,
-                        pid,
-                        linker.link(p_text),
-                        pec_max,
-                    )
-                    p_entities = passage_entity_cache[pid]
-
                 # Compute features (use appropriate scores)
                 sparse_signal_score = (
                     bm25_score
@@ -681,37 +633,17 @@ def process_queries(
                     dense_feats = [float(ds), 0.0, 0.0, float(z)]
                 else:
                     dense_feats = compute_dense_features_with_score(
-                        q_emb=q_emb,
+                        q_emb=q_dense,
                         p_emb=p_embs[i],
                         dense_score=active_dense_scores[i],
                         score_mean=dense_score_mean,
                         score_std=dense_score_std,
                     ).tolist()
 
-                use_exact_for_candidate = bool(exact_distance_features) or (
-                    use_refine and i < int(kg_refine_top_n)
-                )
-                kg_feats = compute_kg_features(
-                    q_entities=q_entities,
-                    p_entities=p_entities,
-                    G=kg,
-                    max_path=int(kg_max_path),
-                    query_cache=(
-                        query_kg_cache_exact if use_exact_for_candidate and query_kg_cache_exact is not None
-                        else query_kg_cache_base
-                    ),
-                    degree_lookup=degree_lookup,
-                    node_set=node_set,
-                ).tolist()
-                # Track branch feature scales for troubleshooting.
                 sf = np.asarray(sparse_feats, dtype=np.float32)
                 df = np.asarray(dense_feats, dtype=np.float32)
-                kf = np.asarray(kg_feats, dtype=np.float32)
                 sparse_l1_sum += float(np.mean(np.abs(sf)))
                 dense_l1_sum += float(np.mean(np.abs(df)))
-                kg_l1_sum += float(np.mean(np.abs(kf)))
-                if kf.shape[0] == 6:
-                    kg_feat_abs_sum += np.abs(kf).astype(np.float64)
                 diag_samples += 1
 
                 label = 1 if pid in gold_ids else 0
@@ -725,9 +657,7 @@ def process_queries(
                     "gold_passage_ids": list(gold_ids),
                     "sparse_feats": sparse_feats,
                     "dense_feats": dense_feats,
-                    "kg_feats": kg_feats,
                     "qtype_onehot": qtype_oh,
-                    "kg_coverage": kg_coverage,
                     "retriever_type": retriever_type,
                     "has_positive_in_pool": has_positive_in_pool,
                 }
@@ -774,19 +704,14 @@ def process_queries(
         logger.info(
             "Feature scale diagnostics | "
             f"sparse_mean_abs={sparse_l1_sum / diag_samples:.6f} | "
-            f"dense_mean_abs={dense_l1_sum / diag_samples:.6f} | "
-            f"kg_mean_abs={kg_l1_sum / diag_samples:.6f}"
+            f"dense_mean_abs={dense_l1_sum / diag_samples:.6f}"
         )
-        logger.info(
-            "KG per-dimension mean|abs| = "
-            + ", ".join(f"f{i}={v / diag_samples:.6f}" for i, v in enumerate(kg_feat_abs_sum))
+    if query_cache_out_path and qid_emb_cache:
+        save_query_emb_cache(
+            query_cache_out_path,
+            qid_emb_cache,
+            expected_dim=expected_query_feat_dim,
         )
-    if query_cache_out_path:
-        cp = pathlib.Path(query_cache_out_path)
-        cp.parent.mkdir(parents=True, exist_ok=True)
-        with cp.open("wb") as f:
-            pickle.dump(qid_emb_cache, f, protocol=pickle.HIGHEST_PROTOCOL)
-        logger.info(f"Wrote query cache -> {cp} ({len(qid_emb_cache):,} qids)")
 
 # -----------------------------------------------------------------------------
 # Main
@@ -898,6 +823,22 @@ def main():
         help="Device for encoder/retriever components. Default auto.",
     )
     parser.add_argument(
+        "--faiss-gpu",
+        action="store_true",
+        help="Force FAISS index search/reconstruct on GPU (needs faiss-gpu package).",
+    )
+    parser.add_argument(
+        "--no-faiss-gpu",
+        action="store_true",
+        help="Keep FAISS on CPU even when --device cuda.",
+    )
+    parser.add_argument(
+        "--text-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Skip KG feature computation (default: configs/base.yaml model.text_only).",
+    )
+    parser.add_argument(
         "--passage-entity-cache-max",
         type=int,
         default=150_000,
@@ -914,20 +855,21 @@ def main():
     set_all_seeds(int(cfg.seed))
     configured_query_feat_dim = int(cfg.model.query_feat_dim)
 
-    # Load KG and components
-    logger.info("Loading KG and lexical index ...")
-    kg, lex = load_kg(cfg.paths.kg_graph, cfg.paths.kg_lexical_idx)
-    linker = EntityLinker(
-        lexical_index=lex,
-        max_entities=int(cfg.kg.max_entities_per_text),
+    if args.text_only is False:
+        raise ValueError(
+            "KG rank-data generation was removed. Omit --no-text-only (text-only is default)."
+        )
+    logger.info("Text-only rank generation (no KG features).")
+
+    logger.info(
+        "Encoder config | controller query_emb: "
+        f"{cfg.encoder.model_name} (dim={configured_query_feat_dim}, "
+        f"batch={cfg.encoder.batch_size}, max_len={cfg.encoder.max_length}) | "
+        f"SPLADE++={cfg.retrieval.spladepp_encoder} | "
+        f"MedCPT query={cfg.retrieval.medcpt_query_encoder} | "
+        f"MedCPT article={cfg.retrieval.medcpt_article_encoder}"
     )
 
-    logger.info("Pre-computing KG degree lookup and node set ...")
-    degree_lookup = build_degree_lookup(kg)
-    node_set = build_node_set(kg)
-    logger.success(f"KG ready | degree_lookup={len(degree_lookup):,} nodes | node_set={len(node_set):,}")
-
-    # Load encoder
     if args.device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     else:
@@ -936,10 +878,25 @@ def main():
         raise RuntimeError(
             "--device cuda requested but torch.cuda.is_available() is False in this venv."
         )
-    logger.info(f"Loading encoder on {device} ...")
+    dense_kw = _faiss_kwargs(cfg, device, args)
+    if dense_kw["use_faiss_gpu"] and device == "cuda":
+        if faiss_gpu_available():
+            logger.info(
+                f"FAISS: native GPU if available (gpu_id={dense_kw['faiss_gpu_id']})"
+            )
+        else:
+            logger.info(
+                f"FAISS: torch CUDA fallback on gpu_id={dense_kw['faiss_gpu_id']} "
+                "(faiss-cpu only — no faiss-gpu pip package needed)"
+            )
+    if not args.dense_from_retriever_scores:
+        logger.info(
+            "Tip: add --dense-from-retriever-scores for much faster rank-data generation "
+            "(skips per-candidate FAISS reconstruct; dense_feats use [score,0,0,z])."
+        )
+
+    logger.info(f"Loading PubMedBERT encoder (fp32, matches FAISS index) on {device} ...")
     encoder = SentenceTransformer(cfg.encoder.model_name, device=device)
-    if device == "cuda":
-        encoder = encoder.half()
 
     # Use the encoder's real output dimension as source of truth for rank-data.
     # This avoids hard failures when config.model.query_feat_dim is stale.
@@ -953,14 +910,6 @@ def main():
     expected_query_feat_dim = encoder_query_feat_dim
 
     max_candidates = int(cfg.retrieval.candidate_pool_size)
-    exact_kg_distances = bool(getattr(cfg.kg, "exact_distance_features", False))
-    if args.exact_kg_distances and args.no_exact_kg_distances:
-        raise ValueError("Use only one of --exact-kg-distances / --no-exact-kg-distances.")
-    if args.exact_kg_distances:
-        exact_kg_distances = True
-    if args.no_exact_kg_distances:
-        exact_kg_distances = False
-    logger.info(f"Exact KG distance features: {exact_kg_distances}")
 
     # ``--retriever all`` iterates the four hybrid families used in the paper:
     #   (1) BM25 + FAISS              (classical sparse + neural dense)
@@ -980,11 +929,17 @@ def main():
     )
 
     for retriever_type in retriever_types:
-        kg_refine_top_n = (
-            int(args.kg_refine_top_n)
-            if args.kg_refine_top_n is not None
-            else int(getattr(cfg.kg, "refine_top_n", 0) or 0)
-        )
+        medcpt_encoder = None
+        if uses_medcpt_dense(retriever_type):
+            logger.info("Loading MedCPT encoders for dense-branch distance features ...")
+            medcpt_encoder = MedCPTFeatureEncoder(
+                article_encoder=str(cfg.retrieval.medcpt_article_encoder),
+                query_encoder=str(cfg.retrieval.medcpt_query_encoder),
+                device=device,
+                batch_size=int(cfg.retrieval.medcpt_batch_size),
+                max_length=int(cfg.retrieval.medcpt_max_length),
+                fp16=(device == "cuda"),
+            )
         cache_paths_all: List[str] = []
         cache_paths_train: List[str] = []
         if args.mode == "unified":
@@ -1000,10 +955,27 @@ def main():
 
             # Get unified retriever
             try:
-                retriever = get_retriever(unified_corpus, cfg, retriever_type)
+                retriever = get_retriever(
+                    unified_corpus,
+                    cfg,
+                    retriever_type,
+                    device=device,
+                    dense_kw=dense_kw,
+                )
             except FileNotFoundError as e:
                 logger.warning(f"Skipping unified mode for retriever={retriever_type} - {e}")
                 continue
+
+            faiss_lookup = None
+            if uses_faiss_dense(retriever_type):
+                upaths = _index_paths(unified_corpus)
+                if upaths["faiss_path"].exists():
+                    faiss_lookup = FaissPassageEmbeddingLookup(
+                        str(upaths["faiss_path"]),
+                        str(upaths["faiss_meta"]),
+                        use_faiss_gpu=dense_kw["use_faiss_gpu"],
+                        faiss_gpu_id=dense_kw["faiss_gpu_id"],
+                    )
 
             # Process datasets
             for dataset_name, dataset_config in DATASETS.items():
@@ -1034,10 +1006,6 @@ def main():
                             retriever=retriever,
                             retriever_type=retriever_type,
                             encoder=encoder,
-                            linker=linker,
-                            kg=kg,
-                            degree_lookup=degree_lookup,
-                            node_set=node_set,
                             idf_table=idf_table,
                             max_candidates=max_candidates,
                             max_queries=args.max_queries,
@@ -1049,10 +1017,8 @@ def main():
                                 else query_cache_file(retriever_type, dataset_name, split)
                             ),
                             dense_from_retriever_scores=bool(args.dense_from_retriever_scores),
-                            exact_distance_features=exact_kg_distances,
-                            kg_max_path=int(getattr(cfg.kg, "max_path_length", 4)),
-                            kg_refine_top_n=kg_refine_top_n,
-                            passage_entity_cache_max=int(args.passage_entity_cache_max),
+                            faiss_lookup=faiss_lookup,
+                            medcpt_encoder=medcpt_encoder,
                         )
                         if not args.no_write_query_cache:
                             cp = query_cache_file(retriever_type, dataset_name, split)
@@ -1092,10 +1058,27 @@ def main():
 
                 # Get retriever for this corpus
                 try:
-                    retriever = get_retriever(corpus_dir, cfg, retriever_type)
+                    retriever = get_retriever(
+                        corpus_dir,
+                        cfg,
+                        retriever_type,
+                        device=device,
+                        dense_kw=dense_kw,
+                    )
                 except FileNotFoundError as e:
                     logger.warning(f"Skipping {dataset_name} - {e}")
                     continue
+
+                faiss_lookup = None
+                if uses_faiss_dense(retriever_type):
+                    dpaths = _index_paths(corpus_dir)
+                    if dpaths["faiss_path"].exists():
+                        faiss_lookup = FaissPassageEmbeddingLookup(
+                            str(dpaths["faiss_path"]),
+                            str(dpaths["faiss_meta"]),
+                            use_faiss_gpu=dense_kw["use_faiss_gpu"],
+                            faiss_gpu_id=dense_kw["faiss_gpu_id"],
+                        )
 
                 # Process splits for this dataset
                 for split in ["train", "dev", "eval", "test"]:
@@ -1121,10 +1104,6 @@ def main():
                             retriever=retriever,
                             retriever_type=retriever_type,
                             encoder=encoder,
-                            linker=linker,
-                            kg=kg,
-                            degree_lookup=degree_lookup,
-                            node_set=node_set,
                             idf_table=idf_table,
                             max_candidates=max_candidates,
                             max_queries=args.max_queries,
@@ -1136,10 +1115,8 @@ def main():
                                 else query_cache_file(retriever_type, dataset_name, split)
                             ),
                             dense_from_retriever_scores=bool(args.dense_from_retriever_scores),
-                            exact_distance_features=exact_kg_distances,
-                            kg_max_path=int(getattr(cfg.kg, "max_path_length", 4)),
-                            kg_refine_top_n=kg_refine_top_n,
-                            passage_entity_cache_max=int(args.passage_entity_cache_max),
+                            faiss_lookup=faiss_lookup,
+                            medcpt_encoder=medcpt_encoder,
                         )
                         if not args.no_write_query_cache:
                             cp = query_cache_file(retriever_type, dataset_name, split)
@@ -1152,10 +1129,12 @@ def main():
             merge_query_caches(
                 cache_paths_all,
                 f"data/query_emb_cache_{rname}_all.pkl",
+                expected_dim=expected_query_feat_dim,
             )
             merge_query_caches(
                 cache_paths_train,
                 f"data/query_emb_cache_{rname}_train_all.pkl",
+                expected_dim=expected_query_feat_dim,
             )
 
     manifest = {

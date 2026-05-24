@@ -1,14 +1,19 @@
 import gc
 import json
+import math
 import random
 from collections import OrderedDict
 from typing import Dict, List, Optional
 import os
-import pickle
 from pathlib import Path
 import time
 
 import torch
+from src.common.query_emb_cache import (
+    load_query_emb_cache,
+    normalize_emb_vector,
+    save_query_emb_cache,
+)
 import torch.optim as optim
 from loguru import logger
 from sentence_transformers import SentenceTransformer
@@ -91,7 +96,12 @@ class StreamingRankDataset(IterableDataset):
             self._qid_emb_cache.move_to_end(qid)
         return self._qid_emb_cache[qid]
 
-    def _emb_cache_set(self, qid: str, emb_list: List[float]) -> None:
+    def _emb_cache_set(self, qid: str, emb_list) -> None:
+        emb_list = normalize_emb_vector(emb_list)
+        if len(emb_list) != self.query_feat_dim:
+            raise ValueError(
+                f"query_emb dim mismatch for qid={qid}: got {len(emb_list)} expected {self.query_feat_dim}"
+            )
         if qid in self._qid_emb_cache:
             del self._qid_emb_cache[qid]
         self._qid_emb_cache[qid] = emb_list
@@ -106,32 +116,24 @@ class StreamingRankDataset(IterableDataset):
         p = Path(self.query_emb_cache_path)
         if not p.exists():
             return
-        try:
-            with p.open("rb") as f:
-                data = pickle.load(f)
-            if isinstance(data, dict):
-                self._qid_emb_cache = OrderedDict(
-                    (str(k), v) for k, v in data.items()
-                )
-                logger.info(
-                    f"Loaded query_emb cache: {len(self._qid_emb_cache):,} queries from {p}"
-                )
-        except Exception as e:
-            logger.warning(f"Failed to load query_emb cache {p}: {e}")
+        loaded = load_query_emb_cache(p, expected_dim=self.query_feat_dim)
+        if loaded:
+            self._qid_emb_cache = OrderedDict(loaded.items())
+            logger.info(
+                f"Loaded query_emb cache: {len(self._qid_emb_cache):,} queries from {p}"
+            )
 
     def _save_query_emb_cache(self):
         if not self.query_emb_cache_path:
             return
-        p = Path(self.query_emb_cache_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with p.open("wb") as f:
-                pickle.dump(self._qid_emb_cache, f, protocol=pickle.HIGHEST_PROTOCOL)
-            logger.info(
-                f"Saved query_emb cache: {len(self._qid_emb_cache):,} queries -> {p}"
+            save_query_emb_cache(
+                self.query_emb_cache_path,
+                self._qid_emb_cache,
+                expected_dim=self.query_feat_dim,
             )
         except Exception as e:
-            logger.warning(f"Failed to save query_emb cache {p}: {e}")
+            logger.warning(f"Failed to save query_emb cache {self.query_emb_cache_path}: {e}")
 
     def _maybe_precompute_query_embeddings(self):
         if not self.precompute_query_emb:
@@ -327,20 +329,28 @@ def record_to_tensor(
     rec: Dict,
     query_feat_dim: int = 768,
     query_emb_override: Optional[List[float]] = None,
+    kg_feat_dim: int = 0,
 ) -> Dict[str, torch.Tensor]:
     query_emb = query_emb_override if query_emb_override is not None else rec.get("query_emb")
     if not (isinstance(query_emb, list) and len(query_emb) == int(query_feat_dim)):
         raise ValueError(
             "query_emb missing or invalid and no runtime recomputation provided."
         )
-    return {
+    kg_dim = max(0, int(kg_feat_dim))
+    kg_feats = rec.get("kg_feats")
+    if not isinstance(kg_feats, list) or len(kg_feats) != kg_dim:
+        kg_feats = [0.0] * kg_dim if kg_dim else []
+    kg_cov = float(rec.get("kg_coverage", 0.0))
+    out = {
         "sparse_feats": torch.tensor(rec["sparse_feats"], dtype=torch.float32),
         "dense_feats": torch.tensor(rec["dense_feats"], dtype=torch.float32),
-        "kg_feats": torch.tensor(rec["kg_feats"], dtype=torch.float32),
         "query_emb": torch.tensor(query_emb, dtype=torch.float32),
         "qtype_onehot": torch.tensor(rec["qtype_onehot"], dtype=torch.float32),
-        "kg_coverage": torch.tensor(rec["kg_coverage"], dtype=torch.float32),
     }
+    if kg_dim:
+        out["kg_feats"] = torch.tensor(kg_feats, dtype=torch.float32)
+        out["kg_coverage"] = torch.tensor(kg_cov, dtype=torch.float32)
+    return out
 
 
 def collate_fn(batch):
@@ -381,19 +391,42 @@ class GARDIANTrainer:
         )
         self.scaler = torch.amp.GradScaler("cuda", enabled=self._use_amp)
         self.loss_fn = bce_loss
+        self.base_lr = float(cfg.training.lr)
+        self.warmup_epochs = max(0, int(getattr(cfg.training, "warmup_epochs", 2)))
+        self.min_lr_ratio = float(getattr(cfg.training, "min_lr_ratio", 0.05))
 
     def forward_batch(self, batch):
         batch = {k: v.to(self.device, non_blocking=True) for k, v in batch.items()}
-        outputs = self.model(
-            sparse_feats=batch["sparse_feats"],
-            dense_feats=batch["dense_feats"],
-            kg_feats=batch["kg_feats"],
-            query_emb=batch["query_emb"],
-            qtype_onehot=batch["qtype_onehot"],
-            kg_coverage=batch["kg_coverage"],
-        )
+        kwargs = {
+            "sparse_feats": batch["sparse_feats"],
+            "dense_feats": batch["dense_feats"],
+            "query_emb": batch["query_emb"],
+            "qtype_onehot": batch["qtype_onehot"],
+        }
+        if "kg_feats" in batch:
+            kwargs["kg_feats"] = batch["kg_feats"]
+        if "kg_coverage" in batch:
+            kwargs["kg_coverage"] = batch["kg_coverage"]
+        outputs = self.model(**kwargs)
         scores = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
         return scores.float()
+
+    def _set_lr_for_epoch(self, epoch: int, total_epochs: int) -> float:
+        """Linear warmup then cosine decay to min_lr."""
+        base = self.base_lr
+        min_lr = max(base * self.min_lr_ratio, 1e-9)
+        we = min(int(self.warmup_epochs), max(int(total_epochs) - 1, 0))
+        if we > 0 and epoch <= we:
+            lr = base * float(epoch) / float(we)
+        else:
+            n_cos = max(int(total_epochs) - int(we), 1)
+            k = int(epoch) - int(we) - 1
+            denom = max(n_cos - 1, 1)
+            t = min(max(float(k) / float(denom), 0.0), 1.0)
+            lr = min_lr + 0.5 * (base - min_lr) * (1.0 + math.cos(math.pi * t))
+        for g in self.opt.param_groups:
+            g["lr"] = lr
+        return lr
 
     def train_epoch(self, loader):
         self.model.train()
@@ -488,8 +521,9 @@ class GARDIANTrainer:
         best_state = None
 
         for epoch in range(1, int(self.cfg.training.epochs) + 1):
+            cur_lr = self._set_lr_for_epoch(epoch, int(self.cfg.training.epochs))
             epoch_start = time.time()
-            logger.info(f"\n{'=' * 50}\nEpoch {epoch}/{self.cfg.training.epochs}\n{'=' * 50}")
+            logger.info(f"\n{'=' * 50}\nEpoch {epoch}/{self.cfg.training.epochs} (lr={cur_lr:.2e})\n{'=' * 50}")
             train_loss = self.train_epoch(train_dl)
             dev_ndcg = None
             did_eval = False
@@ -531,6 +565,7 @@ class GARDIANTrainer:
                 "best_ndcg@10_so_far": (float(best_metric) if best_metric >= 0 else None),
                 "patience_counter": int(patience),
                 "epoch_elapsed_sec": float(time.time() - epoch_start),
+                "lr": float(cur_lr),
             }
             self.epoch_logs.append(epoch_log)
 

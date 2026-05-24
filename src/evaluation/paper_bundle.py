@@ -13,22 +13,27 @@ from omegaconf import OmegaConf
 
 from src.common.question_types import assert_cfg_question_types
 from src.common.rank_data_paths import resolve_rank_data_file
+from src.evaluation.baseline_systems import normalize_eval_results
 from src.evaluation.rank_jsonl_eval import evaluate_all_from_rank_data
 from src.evaluation.stats import bootstrap_delta_ci, bootstrap_mean_ci, paired_randomization_pvalue
-from src.model.gardian import GARDIAN, build_gardian_from_model_cfg
+from src.model.gardian import GARDIAN, build_gardian_from_model_cfg, load_checkpoint_state
 
 
-def build_paper_model(cfg: Any, device: str, retriever: str) -> GARDIAN:
+def build_paper_model(cfg: Any, device: str, retriever: str) -> tuple[GARDIAN, int]:
     ckpt_path = pathlib.Path(cfg.paths.results_dir) / f"gardian_best_{retriever}.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    ckpt_model_cfg = ckpt.get("cfg", {}).get("model") if isinstance(ckpt.get("cfg"), dict) else None
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt_cfg = ckpt.get("cfg", {}) if isinstance(ckpt.get("cfg"), dict) else {}
+    ckpt_model_cfg = ckpt_cfg.get("model") if isinstance(ckpt_cfg.get("model"), dict) else None
     model = build_gardian_from_model_cfg(ckpt_model_cfg or cfg.model)
-    model.load_state_dict(ckpt["model_state"])
+    load_checkpoint_state(model, ckpt["model_state"], strict=False)
     model.to(device)
     model.eval()
-    return model
+    expected_qdim = int(
+        (ckpt_model_cfg or {}).get("query_feat_dim", cfg.model.query_feat_dim)
+    )
+    return model, expected_qdim
 
 
 def abl_to_kw(name: str) -> Optional[str]:
@@ -123,12 +128,12 @@ def run_paper_chunk(
     assert_cfg_question_types(cfg.model.question_types)
 
     try:
-        model = build_paper_model(cfg, compute_device, retriever)
+        model, expected_qdim = build_paper_model(cfg, compute_device, retriever)
         device_for_eval = compute_device
     except RuntimeError as e:
         if "out of memory" in str(e).lower() and str(compute_device).startswith("cuda"):
             logger.warning("CUDA OOM while loading model in worker; retrying on CPU.")
-            model = build_paper_model(cfg, "cpu", retriever)
+            model, expected_qdim = build_paper_model(cfg, "cpu", retriever)
             device_for_eval = "cpu"
         else:
             raise
@@ -149,6 +154,7 @@ def run_paper_chunk(
                 else str(device_for_eval)
             )
             logger.info(f"=== {retriever} | {ds_name} | ablation={abl_name} | device={dev_log} | query_enc={query_encoder_device} ===")
+            gardian_adaptive = bool(getattr(cfg.qa, "gardian_adaptive_retrieval", False))
             raw = evaluate_all_from_rank_data(
                 rank_path,
                 model,
@@ -157,8 +163,13 @@ def run_paper_chunk(
                 collect_per_query=True,
                 query_encoder_name=query_encoder_name,
                 query_encoder_device=query_encoder_device,
-                canonical_baseline_keys=True,
+                expected_query_feat_dim=expected_qdim,
+                canonical_baseline_keys=False,
+                include_standalone_spladepp=False,
+                gardian_adaptive_retrieval=gardian_adaptive,
+                cfg=cfg,
             )
+            raw = normalize_eval_results(raw, retriever)
             for sys_name, block in raw.items():
                 if isinstance(block, dict) and "_per_query" in block and bootstrap > 0:
                     attach_bootstrap(block, n_boot=int(bootstrap), seed=int(seed))

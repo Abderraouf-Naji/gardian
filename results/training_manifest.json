@@ -1,0 +1,29 @@
+{
+  "created_utc": "2026-05-16T23:36:41.605811+00:00",
+  "script": "scripts/04_train_gardian.py",
+  "args": {
+    "retriever": "hybrid_bm25_medcpt",
+    "include_eval_in_dev": false,
+    "no_auto_cache_path": false,
+    "epochs": 10,
+    "branch_hidden": null,
+    "controller_hidden": null,
+    "dropout": null,
+    "seed": null
+  },
+  "seed": 42,
+  "git_revision": "9425613ea129bf235930b207dc3dea4a031db1be",
+  "platform": "Linux-6.8.0-111-generic-x86_64-with-glibc2.39",
+  "python_version": "3.12.3 (main, Mar 23 2026, 19:04:32) [GCC 13.3.0]",
+  "summary_path": "results/training_summary_all_retrievers.json",
+  "input_files": {
+    "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_train_all.jsonl": {
+      "exists": true,
+      "sha256": "871c6a11d2536e0b10d5ff097ad0d2b138a84a8b50295e101b349de50857acd1"
+    },
+    "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_dev_all.jsonl": {
+      "exists": true,
+      "sha256": "2c4b4e6a3c0b06b49d9e67797167be75f286c67570f7a3f379ab3c65a6c38c3c"
+    }
+  }
+}

@@ -6,6 +6,7 @@ paths:
   bm25_index_pkl: "data/indices/bm25/unified/index.pkl"
   faiss_index: "data/indices/faiss/unified/faiss.index"
   faiss_meta: "data/indices/faiss/unified/faiss_meta.jsonl"
+  # Legacy KG paths (unused when model.text_only=true)
   kg_graph: "data/kg/default/umls_kg.pkl"
   kg_lexical_idx: "data/kg/default/umls_kg_lex.pkl"
   rank_data_train: "data/rank_data_train.jsonl"
@@ -22,12 +23,21 @@ corpus:
   medmcqa_target_passages: 450000
 
 retrieval:
+  # Per-channel index search caps (max depth per retriever, NOT reader context size).
   top_k_bm25: 50
   top_k_faiss: 50
   top_k_spladepp: 50
   top_k_medcpt: 50
-  # Larger pool improves positive-in-pool recall and gives KG branch room to matter.
+  # GARDIAN live QA: controller α,β fusion on candidates (pool size = qa.rq4_full_union_pool
+  # ? candidate_pool_size union : adaptive subset). Reader sees qa.top_k_passages (default 10).
+  #   proportional  — default; adaptive budgets + adaptive fusion (not fixed hybrid RRF).
+  #   full_caps     — ablation only: always 50+50 union, α used only in rerank fusion.
+  adaptive_channel_budget: proportional
+  # Offline rank JSONL (script 03): fixed 50+50 union capped here; not sent to the LLM.
   candidate_pool_size: 100
+  # FAISS ANN search on GPU (requires faiss-gpu, not faiss-cpu).
+  faiss_use_gpu: true
+  faiss_gpu_id: 0
   # Real SPLADE (sparse-MLM, log(1+ReLU)+max-pool, vocabulary-space).
   # SPLADE++ (CoCondenser-EnsembleDistil) is the open learned-sparse retriever
   # used by GARDIAN.
@@ -39,61 +49,59 @@ retrieval:
   medcpt_query_encoder: "ncbi/MedCPT-Query-Encoder"
   medcpt_batch_size: 256
   medcpt_max_length: 512
+  # Cross-encoder reranking baseline (same candidate pool as hybrid / GARDIAN).
+  # Score rank JSONL with scripts/13_backfill_cross_encoder_scores.py before eval.
+  # backend: auto | st | monobert | monot5  (auto picks from model name)
+  cross_encoder_backend: auto
+  # Strong defaults: BGE reranker (st), or castorini/monobert-large-msmarco,
+  # castorini/monot5-base-msmarco-10k, castorini/monot5-base-med-msmarco (medical).
+  # Default for scripts/13; compare script also runs monot5_med, monobert, msmarco_minilm.
+  cross_encoder_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  cross_encoder_batch_size: 32
+  cross_encoder_max_length: 512
+  cross_encoder_fp16: true
 
 encoder:
   model_name: "NeuML/pubmedbert-base-embeddings"
   batch_size: 512
   max_length: 128
 
-kg:
-  max_path_length: 6
-  max_entities_per_text: 16
-  # Full-run mode keeps exact KG BFS disabled. Exact distances are useful for
-  # small audits, but too slow for all-query rank generation on the full KG.
-  exact_distance_features: false
-  # Keep 0 for production speed; use exact KG only in targeted audits.
-  refine_top_n: 0
-
 model:
+  text_only: true
   sparse_feat_dim: 3
   dense_feat_dim: 4
-  kg_feat_dim: 6
-  # Slightly larger controller/heads for stronger branch balancing.
+  # Legacy rank JSONL may still carry kg_feats; model ignores them when text_only=true.
+  kg_feat_dim: 0
   branch_hidden: 2048
   controller_hidden: 2048
   query_feat_dim: 768
-  # Must match src/common/question_types.ORDERED_QUESTION_TYPES (rank JSONL one-hot axes).
   question_types: ["diagnosis", "treatment", "mechanism", "contraindication", "factoid", "yesno", "other"]
-  dropout: 0.15
+  dropout: 0.12
 
 training:
-  epochs: 30
+  epochs: 10
   batch_size: 256
-  lr: 2.0e-5
-  weight_decay: 1.0e-4
+  lr: 3.0e-5
+  weight_decay: 1.5e-4
   margin: 1.0
-  # Implemented in src/training/trainer.py as pairwise logistic BCE over
-  # in-query positive/negative pairs.
+  # Linear warmup epochs then cosine decay to lr * min_lr_ratio (see trainer.py).
+  warmup_epochs: 3
+  min_lr_ratio: 0.08
   loss: "pairwise_bce"
   early_stopping_patience: 6
   eval_metric: "ndcg@10"
-  num_negatives: 32
-  # Bias pair sampling toward top-ranked non-gold candidates. These are the
-  # negatives that most affect nDCG/MRR, so this improves training without
-  # regenerating rank JSONL files.
-  hard_negative_top_n: 100
-  hard_negative_fraction: 0.75
+  num_negatives: 48
+  hard_negative_top_n: 120
+  hard_negative_fraction: 0.85
   # Speed knobs for large rank JSONL training
-  max_pairs_per_query: 32
+  max_pairs_per_query: 48
   precompute_query_emb: true
   query_encoder_batch_size: 1024
   eval_batch_size: 8192
-  query_emb_cache_path: "data/query_emb_cache_hybrid_train_all.pkl"
+  # Overridden per retriever in scripts/04_train_gardian.py (e.g. query_emb_cache_hybrid_bm25_faiss_train_all.pkl)
+  query_emb_cache_path: null
   # LRU cap for in-memory qid→query_emb entries during training (ignored if preloaded cache is larger).
   query_emb_cache_max_entries: 500000
-  # Keep 0: StreamingRankDataset must preserve query-contiguous groups.
-  # Line-level multi-worker sharding splits a query across workers and corrupts
-  # positive/negative pair sampling.
   num_workers: 0
   cudnn_deterministic: true
 
@@ -102,14 +110,44 @@ evaluation:
   question_type_breakdown: true
 
 qa:
-  # Causal biomedical LM (Mistral-derived). Falls back to Flan-T5 automatically if you
-  # point reader_model at a seq2seq checkpoint.
-  reader_model: meta-llama/Llama-3.1-8B-Instruct
-  # Context window for tokenizer truncation (BioMistral / Mistral often 8k+).
+  # GARDIAN live QA (adaptive reranker, not fixed hybrid):
+  #   query → controller (α_sparse, α_dense) — query-specific, not fixed 0.5/0.5
+  #   → retrieve α·50 sparse + β·50 dense → union pool → GARDIAN rerank (same α,β fusion)
+  #   → top_k_passages (10) to reader — aligns with retrieval Hit@10 / NDCG@10
+  gardian_adaptive_retrieval: true
+  # Live open-domain QA: retrieve from each benchmark's own BM25/FAISS (not unified 3M).
+  use_per_dataset_indices: true
+  # PubMedQA QA: gold_context = labeled abstract; open_domain = per-dataset index RAG.
+  pubmedqa_rag_mode: gold_context
+  # Shorter yes/no RAG prompt + fewer passages (reduces 8B reader confusion).
+  # Legacy flag (v1 compact prompt); v2 RAG reader ignores this.
+  rag_yesno_compact: false
+  yesno_top_k_passages: 10
+  mcq_top_k_passages: 10
+  # Live QA (--online-retrieval): keep FAISS on CPU so an 8B reader can share one GPU.
+  faiss_use_gpu: false
+  reader_model: meta-llama/Meta-Llama-3-8B-Instruct
   reader_max_input_length: 8192
   top_k_passages: 10
-  # Decoder cap (BioMistral / other causal LMs: 512–2048 is usually enough; raise if outputs truncate).
-  max_new_tokens: 2048
+  max_chars_per_passage: 800
+  # v2 reader token budgets (prevents 2k-token rambling on MedMCQA).
+  max_new_tokens_yesno: 300
+  max_new_tokens_mcq: 320
+  max_new_tokens: 256
+  require_citations_yesno: true
+  require_citations_mcq: true
+  reader_repetition_penalty: 1.12
+  reader_no_repeat_ngram_size: 4
+  reader_include_signal_features: false
+  reader_max_citations_yesno: 3
+  reader_max_citations_mcq: 4
+  # Hybrid reader: if true, half slots from sparse + half from dense (can beat RRF top-k).
+  # RQ4 / retrieval-aligned eval: keep false so Hybrid = top-k by RRF, GARDIAN = top-k by rerank.
+  hybrid_balanced_top_k: false
+  rq4_align_retrieval_top_k: true
+  # RQ4 E2E: use 50+50 union pool (~candidate_pool_size) like rank-data training, not adaptive subset.
+  # Adaptive controller still weights GARDIAN fusion; pool matches offline Hit@10 / nDCG evaluation.
+  rq4_full_union_pool: true
   # Self-RAG–inspired ReAct reader (Thought / Action / Observation + SELF_CRITIQUE).
   # Much slower (several decoder calls per question). Default off; enable for paper runs:
   #   qa.reader_react: true   or   python scripts/06_end_to_end_qa.py --reader-react ...

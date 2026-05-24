@@ -2,7 +2,7 @@
 
 Pipeline per request:
   1. Hybrid retrieval (BM25 ``index.pkl`` + FAISS ``faiss.index`` via ``rag_reader``)
-  2. GARDIAN rerank (α-weighted sparse / dense / KG fusion)
+  2. GARDIAN rerank (α-weighted sparse + dense fusion)
   3. RAG reader on GARDIAN top-k passages
 
 Run in background:
@@ -49,13 +49,14 @@ sys.path.insert(0, ".")
 
 from src.common.question_types import assert_cfg_question_types, normalize_question_type, qtype_onehot
 from src.common.rank_data_paths import normalize_retriever_name
-from src.features.dense_feat import compute_dense_features_with_score
-from src.features.kg_feat import build_degree_lookup, build_node_set, build_query_kg_cache, compute_kg_features
-from src.features.sparse import compute_sparse_features
-from src.kg.builder import load_kg
-from src.kg.linker import EntityLinker
-from src.model.gardian import GARDIAN, build_gardian_from_model_cfg
-from src.pipeline.online_feature_cache import OnlinePassageFeatureCache
+from src.evaluation.qa_eval import _enrich_live_candidates_for_gardian
+from src.model.gardian import GARDIAN, build_gardian_from_model_cfg, load_checkpoint_state
+from src.pipeline.rank_dense_features import (
+    FaissPassageEmbeddingLookup,
+    MedCPTFeatureEncoder,
+    uses_faiss_dense,
+    uses_medcpt_dense,
+)
 from src.pipeline.rag_reader import (
     build_retriever_for_qa,
     load_hf_reader,
@@ -107,7 +108,7 @@ def load_gardian(cfg, retriever: str, device: str) -> GARDIAN:
         ckpt = torch.load(ckpt_path, map_location=device)
     ckpt_model_cfg = ckpt.get("cfg", {}).get("model") if isinstance(ckpt.get("cfg"), dict) else None
     model = build_gardian_from_model_cfg(ckpt_model_cfg or cfg.model)
-    model.load_state_dict(ckpt["model_state"])
+    load_checkpoint_state(model, ckpt["model_state"], strict=False)
     model.to(device)
     model.eval()
     return model
@@ -134,27 +135,29 @@ class GardianRuntime:
         self.max_new_tokens = int(max_new_tokens or self.cfg.qa.max_new_tokens)
         self.no_reader = bool(no_reader)
 
-        logger.info("Loading KG + linker (startup only)...")
-        _require_kg_artifacts(self.cfg)
-        self.kg, lex = load_kg(self.cfg.paths.kg_graph, self.cfg.paths.kg_lexical_idx)
-        self.linker = EntityLinker(lexical_index=lex, max_entities=int(self.cfg.kg.max_entities_per_text))
-        self.degree_lookup = build_degree_lookup(self.kg)
-        self.node_set = build_node_set(self.kg)
-
         logger.info("Loading retriever + encoders (startup only)...")
         idx_paths = resolve_retrieval_paths(self.cfg)
         logger.info(
             f"Sparse index: {idx_paths['bm25_index_pkl']} | "
             f"Dense index: {idx_paths['faiss_index']}"
         )
+        self.faiss_lookup = None
+        if uses_faiss_dense(self.retriever_name) and pathlib.Path(idx_paths["faiss_index"]).is_file():
+            self.faiss_lookup = FaissPassageEmbeddingLookup(
+                idx_paths["faiss_index"], idx_paths["faiss_meta"]
+            )
+        self.medcpt_encoder = None
+        if uses_medcpt_dense(self.retriever_name):
+            self.medcpt_encoder = MedCPTFeatureEncoder(
+                article_encoder=str(self.cfg.retrieval.medcpt_article_encoder),
+                query_encoder=str(self.cfg.retrieval.medcpt_query_encoder),
+                device=self.device,
+                batch_size=int(self.cfg.retrieval.medcpt_batch_size),
+                max_length=int(self.cfg.retrieval.medcpt_max_length),
+                fp16=(self.device == "cuda"),
+            )
         self.retriever = build_retriever_for_qa(self.cfg, self.retriever_name, device=self.device)
         self.encoder = SentenceTransformer(self.cfg.encoder.model_name, device=self.device)
-        self.feature_cache = OnlinePassageFeatureCache(
-            embedding_index_path=idx_paths["faiss_index"],
-            embedding_meta_path=idx_paths["faiss_meta"],
-            linker=self.linker,
-            encoder=self.encoder,
-        )
 
         logger.info("Loading GARDIAN (startup only)...")
         self.gardian = load_gardian(self.cfg, self.retriever_name, self.device)
@@ -198,64 +201,24 @@ class GardianRuntime:
                 "top_passages": [],
             }
 
-        qtype_oh = qtype_onehot(qtype)
-        q_emb = self.encoder.encode([question], normalize_embeddings=True, show_progress_bar=False, convert_to_numpy=True)[0]
-        # Fast online path: passage embeddings are reconstructed from the
-        # pre-built FAISS index instead of re-encoding candidate text.
-        p_embs = self.feature_cache.get_passage_embeddings(candidates)
-        active_dense_scores = [
-            float(c.get("medcpt_score", c.get("dense_score", c.get("score", 0.0))))
-            for c in candidates
-        ]
-        dense_score_mean = float(np.mean(active_dense_scores))
-        dense_score_std = float(np.std(active_dense_scores) + 1e-8)
-
-        q_entities = self.linker.link(question)
-        kg_coverage = 1.0 if q_entities else 0.0
-        query_kg_cache = build_query_kg_cache(
-            q_entities,
-            self.kg,
-            node_set=self.node_set,
-            compute_distances=bool(getattr(self.cfg.kg, "exact_distance_features", False)),
-            max_path=int(getattr(self.cfg.kg, "max_path_length", 4)),
+        qtype_oh, q_emb = _enrich_live_candidates_for_gardian(
+            question=question,
+            candidates=candidates,
+            qtype=qtype,
+            retriever_name=self.retriever_name,
+            encoder=self.encoder,
+            faiss_lookup=self.faiss_lookup,
+            medcpt_encoder=self.medcpt_encoder,
         )
-
-        for i, cand in enumerate(candidates):
-            p_entities = self.feature_cache.get_passage_entities(cand)
-            cand["sparse_feats"] = compute_sparse_features(
-                query=question,
-                passage=cand.get("text", ""),
-                bm25_score=float(cand.get("bm25_score", cand.get("spladepp_score", 0.0))),
-                idf_table=None,
-            ).tolist()
-            cand["dense_feats"] = compute_dense_features_with_score(
-                q_emb=q_emb,
-                p_emb=p_embs[i],
-                dense_score=active_dense_scores[i],
-                score_mean=dense_score_mean,
-                score_std=dense_score_std,
-            ).tolist()
-            cand["kg_feats"] = compute_kg_features(
-                q_entities=q_entities,
-                p_entities=p_entities,
-                G=self.kg,
-                max_path=int(getattr(self.cfg.kg, "max_path_length", 4)),
-                query_cache=query_kg_cache,
-                degree_lookup=self.degree_lookup,
-                node_set=self.node_set,
-            ).tolist()
-
         ranked = self.gardian.rerank(
             candidates=candidates,
-            query_features={"query_emb": q_emb.tolist(), "qtype_onehot": qtype_oh, "kg_coverage": kg_coverage},
+            query_features={"query_emb": q_emb, "qtype_onehot": qtype_oh},
             device=self.device,
         )
-        # GARDIAN-ordered top-k → RAG reader (same as scripts/08_ask_gardian.py).
         top_for_reader = ranked[: self.top_passages]
         first = ranked[0]
         sparse_alfa = float(first["sparse_alfa"])
         dense_alfa = float(first["dense_alfa"])
-        kg_alfa = float(first["kg_alfa"])
 
         if skip_reader:
             answer = ""
@@ -274,7 +237,6 @@ class GardianRuntime:
                 question_type=qtype,
                 alpha_sparse=sparse_alfa,
                 alpha_dense=dense_alfa,
-                alpha_kg=kg_alfa,
                 include_signal_features=True,
                 use_react=use_react,
                 react_max_steps=react_max_steps,
@@ -290,10 +252,9 @@ class GardianRuntime:
             "reader_skipped": skip_reader,
             "reader_react": use_react,
             "answer": answer,
-            "fusion_formula": "score = alpha_sparse*sparse + alpha_dense*dense + alpha_kg*kg",
+            "fusion_formula": "score = alpha_sparse*sparse + alpha_dense*dense",
             "sparse_alfa": sparse_alfa,
             "dense_alfa": dense_alfa,
-            "kg_alfa": kg_alfa,
             "rag_how_used": (
                 "BM25+FAISS candidates → GARDIAN rerank by fused branch scores → "
                 "top passages sent to the reader LLM."
@@ -307,7 +268,6 @@ class GardianRuntime:
                     "dense_score": float(c.get("dense_score", 0.0)),
                     "sparse_contribution": float(c.get("sparse_contribution", 0.0)),
                     "dense_contribution": float(c.get("dense_contribution", 0.0)),
-                    "kg_contribution": float(c.get("kg_contribution", 0.0)),
                     "text_preview": (c.get("text", "") or "")[:260],
                 }
                 for i, c in enumerate(top_for_reader)

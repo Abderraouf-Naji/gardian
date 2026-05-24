@@ -6,7 +6,7 @@ import tempfile
 from src.evaluation.rank_jsonl_eval import evaluate_all_from_rank_data
 
 
-def _pair(qid, pid, label, doc2query, bm25=0.1, dense=0.2):
+def _pair(qid, pid, label, doc2query=0.0, cross_encoder=0.0, bm25=0.1, dense=0.2):
     sparse = [bm25, 0.0, 0.0]
     dense_f = [dense, 0.0, 0.0, 0.0]
     kg = [0.0] * 6
@@ -20,6 +20,7 @@ def _pair(qid, pid, label, doc2query, bm25=0.1, dense=0.2):
         "bm25_score": bm25,
         "dense_score": dense,
         "doc2query_score": doc2query,
+        "cross_encoder_score": cross_encoder,
         "sparse_feats": sparse,
         "dense_feats": dense_f,
         "kg_feats": kg,
@@ -42,8 +43,8 @@ def test_doc2query_evaluated_when_nonzero():
             f.write(json.dumps(r) + "\n")
         path = f.name
     out = evaluate_all_from_rank_data(path, model=None, device=None)
-    assert "doc2query" in out
-    assert out["doc2query"]["ndcg@10"] > 0.0
+    assert "bm25" in out
+    assert out["bm25"]["ndcg@10"] > 0.0
 
 
 def _neural_row(qid, pid, label, doc2query, biobert_dense):
@@ -81,12 +82,28 @@ def test_canonical_baseline_keys_hybrid_neural():
             f.write(json.dumps(r) + "\n")
         path = f.name
     out = evaluate_all_from_rank_data(path, model=None, device=None, canonical_baseline_keys=True)
-    assert "sparse(doc2query)" in out
-    assert "dense(biobert)" in out
-    assert "sum(doc2query,biobert)" in out
+    assert "sparse(spladepp)" in out
+    assert "dense(medcpt)" in out
+    assert "sum(spladepp,medcpt)" in out
     assert "bm25" not in out
     assert "hybrid" not in out
     assert out["_meta"]["retriever_type"] == "hybrid_neural"
+
+
+def test_cross_encoder_evaluated_when_nonzero():
+    rows = [
+        _pair("q1", "a", 1, cross_encoder=10.0),
+        _pair("q1", "b", 0, cross_encoder=1.0),
+        _pair("q2", "x", 1, cross_encoder=2.0),
+        _pair("q2", "y", 0, cross_encoder=8.0),
+    ]
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+        path = f.name
+    out = evaluate_all_from_rank_data(path, model=None, device=None)
+    assert "cross_encoder" in out
+    assert out["cross_encoder"]["ndcg@10"] > 0.0
 
 
 def test_rrf_is_reported():

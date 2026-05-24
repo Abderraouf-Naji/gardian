@@ -1,0 +1,20 @@
+{
+  "hybrid_bm25_medcpt": {
+    "best_ndcg10": 0.6981157455428652,
+    "checkpoint": "results/gardian_best_hybrid_bm25_medcpt.pt",
+    "train_path": "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_train_all.jsonl",
+    "dev_path": "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_dev_all.jsonl",
+    "train_sources": [
+      "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_pubmedqa_artificial_train.jsonl",
+      "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_medmcqa_train.jsonl"
+    ],
+    "dev_sources": [
+      "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_pubmedqa_artificial_dev.jsonl",
+      "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_medmcqa_dev.jsonl"
+    ],
+    "training_log_dir": "results/gardian_training/hybrid_bm25_medcpt",
+    "epoch_logs_jsonl": "results/gardian_training/hybrid_bm25_medcpt/epoch_logs.jsonl",
+    "epoch_logs_csv": "results/gardian_training/hybrid_bm25_medcpt/epoch_logs.csv",
+    "run_summary": "results/gardian_training/hybrid_bm25_medcpt/run_summary.json"
+  }
+}

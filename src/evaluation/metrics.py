@@ -12,14 +12,20 @@ from typing import Dict, List, Optional
 import torch
 from loguru import logger
 from sentence_transformers import SentenceTransformer
-import pickle
 from pathlib import Path
 
 from src.common.question_types import normalize_question_type
+from src.common.query_emb_cache import load_query_emb_cache
 
 
 def recall_at_k(ranked_ids: List[str], relevant_ids: set, k: int) -> float:
+    """Per-query success@k (1 if any relevant in top-k). Mean over queries = Hit@k."""
     return 1.0 if any(r in relevant_ids for r in ranked_ids[:k]) else 0.0
+
+
+def hit_at_k(ranked_ids: List[str], relevant_ids: set, k: int) -> float:
+    """Alias for ``recall_at_k`` (binary success@k)."""
+    return recall_at_k(ranked_ids, relevant_ids, k)
 
 
 def mrr_at_k(ranked_ids: List[str], relevant_ids: set, k: int) -> float:
@@ -73,6 +79,7 @@ def evaluate_retrieval(
 
     for k in cutoffs:
         summary[f"recall@{k}"] = float(np.mean(metrics[k]["recall"]))
+        summary[f"hit@{k}"] = float(np.mean(metrics[k]["recall"]))
         summary[f"mrr@{k}"] = float(np.mean(metrics[k]["mrr"]))
         summary[f"ndcg@{k}"] = float(np.mean(metrics[k]["ndcg"]))
 
@@ -116,21 +123,17 @@ def evaluate_rank_data(
             if all_cache.exists():
                 p = all_cache
         if p.exists():
-            try:
-                with p.open("rb") as f:
-                    data = pickle.load(f)
-                if isinstance(data, dict):
-                    query_emb_cache = {str(k): v for k, v in data.items()}
-                    logger.info(
-                        f"Loaded query_emb cache for evaluation: {len(query_emb_cache):,} queries"
-                    )
-            except Exception as e:
-                logger.warning(f"Could not load query_emb cache {query_emb_cache_path}: {e}")
+            loaded = load_query_emb_cache(p)
+            if loaded:
+                query_emb_cache = loaded
+                logger.info(
+                    f"Loaded query_emb cache for evaluation: {len(query_emb_cache):,} queries"
+                )
 
     def _model_query_dim(rec: Dict) -> int:
         qtype_dim = len(rec.get("qtype_onehot", []))
         in_features = model.controller.net[0].in_features
-        return int(in_features) - int(qtype_dim) - 1
+        return int(in_features) - int(qtype_dim)
 
     def _resolve_query_emb(rec: Dict) -> List[float]:
         q = rec.get("query_emb")
@@ -168,40 +171,42 @@ def evaluate_rank_data(
     eval_batch_size = max(1, int(batch_size))
     batch_sparse: List[List[float]] = []
     batch_dense: List[List[float]] = []
-    batch_kg: List[List[float]] = []
     batch_qemb: List[List[float]] = []
     batch_qtype: List[List[float]] = []
-    batch_cov: List[float] = []
     batch_meta: List[tuple] = []
+    text_only = bool(getattr(model, "text_only", True))
+    batch_kg: List[List[float]] = []
+    batch_cov: List[float] = []
 
     def _flush_batch() -> None:
         if not batch_meta:
             return
         sparse_t = torch.tensor(batch_sparse, dtype=torch.float32, device=device)
         dense_t = torch.tensor(batch_dense, dtype=torch.float32, device=device)
-        kg_t = torch.tensor(batch_kg, dtype=torch.float32, device=device)
         qemb_t = torch.tensor(batch_qemb, dtype=torch.float32, device=device)
         qtype_t = torch.tensor(batch_qtype, dtype=torch.float32, device=device)
-        cov_t = torch.tensor(batch_cov, dtype=torch.float32, device=device)
-        out = model(
-            sparse_feats=sparse_t,
-            dense_feats=dense_t,
-            kg_feats=kg_t,
-            query_emb=qemb_t,
-            qtype_onehot=qtype_t,
-            kg_coverage=cov_t,
-            ablation=ablation,
-        )
+        kwargs = {
+            "sparse_feats": sparse_t,
+            "dense_feats": dense_t,
+            "query_emb": qemb_t,
+            "qtype_onehot": qtype_t,
+            "ablation": ablation,
+        }
+        if not text_only:
+            kwargs["kg_feats"] = torch.tensor(batch_kg, dtype=torch.float32, device=device)
+            kwargs["kg_coverage"] = torch.tensor(batch_cov, dtype=torch.float32, device=device)
+        out = model(**kwargs)
         scores = out[0] if isinstance(out, (tuple, list)) else out
         for score, (qid, pid, label) in zip(scores.detach().float().cpu().tolist(), batch_meta):
             query_scores[qid].append((float(score), pid, label))
         batch_sparse.clear()
         batch_dense.clear()
-        batch_kg.clear()
         batch_qemb.clear()
         batch_qtype.clear()
-        batch_cov.clear()
         batch_meta.clear()
+        if not text_only:
+            batch_kg.clear()
+            batch_cov.clear()
 
     with torch.no_grad(), open(dev_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -216,10 +221,11 @@ def evaluate_rank_data(
             q_emb = _resolve_query_emb(rec)
             batch_sparse.append(rec["sparse_feats"])
             batch_dense.append(rec["dense_feats"])
-            batch_kg.append(rec["kg_feats"])
+            if not text_only:
+                batch_kg.append(rec.get("kg_feats", []))
+                batch_cov.append(float(rec.get("kg_coverage", 0.0)))
             batch_qemb.append(q_emb)
             batch_qtype.append(rec["qtype_onehot"])
-            batch_cov.append(float(rec["kg_coverage"]))
             batch_meta.append((rec["qid"], rec["pid"], rec["label"]))
             if len(batch_meta) >= eval_batch_size:
                 _flush_batch()

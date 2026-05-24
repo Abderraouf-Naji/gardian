@@ -22,10 +22,13 @@ class DenseRetriever:
         batch_size: int = 64,
         max_length: int = 512,
         device: str = "cuda",  # Will auto-fallback to cpu on Windows if cuda not available
+        use_faiss_gpu: bool = True,
+        faiss_gpu_id: int = 0,
     ):
-        import faiss
         from sentence_transformers import SentenceTransformer
         import torch
+
+        from src.retrieval.faiss_util import open_faiss_index
 
         # Check CUDA availability on Windows
         if device == "cuda" and not torch.cuda.is_available():
@@ -33,7 +36,12 @@ class DenseRetriever:
             device = "cpu"
 
         self.encoder = SentenceTransformer(encoder_name, device=device)
-        self.index = faiss.read_index(faiss_index_path)
+        self._faiss = open_faiss_index(
+            faiss_index_path,
+            use_gpu=bool(use_faiss_gpu) and device == "cuda",
+            gpu_id=faiss_gpu_id,
+        )
+        self.faiss_backend = self._faiss.backend
         self.batch_size = batch_size
         self.max_length = max_length
         self.device = device
@@ -46,12 +54,15 @@ class DenseRetriever:
                     continue
                 self.meta.append(json.loads(line))
 
-        if len(self.meta) != self.index.ntotal:
+        if len(self.meta) != self._faiss.ntotal:
             logger.warning(
-                f"Meta rows ({len(self.meta)}) != index.ntotal ({self.index.ntotal})"
+                f"Meta rows ({len(self.meta)}) != index.ntotal ({self._faiss.ntotal})"
             )
 
-        logger.info(f"Dense index loaded ({self.index.ntotal} vectors) on {device}")
+        logger.info(
+            f"Dense index loaded ({self._faiss.ntotal} vectors) | "
+            f"encoder={device} | faiss={self.faiss_backend}"
+        )
 
     def _encode(self, texts: List[str]) -> np.ndarray:
         """Encode texts to embeddings."""
@@ -66,7 +77,7 @@ class DenseRetriever:
     def retrieve(self, query: str, top_k: int = 50) -> List[Dict]:
         """Retrieve top-k passages for a query."""
         q_vec = self._encode([query])
-        scores, indices = self.index.search(q_vec, top_k)
+        scores, indices = self._faiss.search(q_vec, top_k)
         results: List[Dict] = []
 
         for score, idx in zip(scores[0], indices[0]):
@@ -87,7 +98,7 @@ class DenseRetriever:
     def batch_retrieve(self, queries: List[str], top_k: int = 50) -> List[List[Dict]]:
         """Batch retrieve for multiple queries."""
         q_vecs = self._encode(queries)
-        all_scores, all_indices = self.index.search(q_vecs, top_k)
+        all_scores, all_indices = self._faiss.search(q_vecs, top_k)
         out: List[List[Dict]] = []
 
         for scores, indices in zip(all_scores, all_indices):

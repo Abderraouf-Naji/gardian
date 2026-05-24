@@ -10,12 +10,13 @@ for the candidate pool, then :func:`run_reader_rag_block` on GARDIAN-ranked
 top-k passages.
 
 Upstream (already in the repo):
-  * Hybrid retrieval + KG features → candidate pool (size set by
-    ``retrieval.candidate_pool_size`` in ``configs/base.yaml``, typically **≤100**
-    passages: union of two top-50 retriever lists after deduplication).
-  * ``GARDIAN.forward`` fuses branch scores with controller weights
-    :math:`(\\alpha_s, \\alpha_d, \\alpha_g)` → relevance score per passage;
-    sort by score → **top-k passages**.
+  * Hybrid retrieval → candidate pool (typically top-50 sparse + top-50 dense,
+    ``retrieval.candidate_pool_size`` ≤ 100 after dedup).
+  * When ``qa.gardian_adaptive_retrieval`` is true (default): query → controller
+    :math:`(\\alpha_s, \\alpha_d)` (not fixed 0.5/0.5) → retrieve
+    :math:`\\alpha_s\\cdot 50` sparse + :math:`\\alpha_d\\cdot 50` dense → union pool
+    → GARDIAN adaptive rerank → **top-k passages to reader** (e.g. 6; not the full pool).
+  * Otherwise: fixed 50+50 hybrid union (ablation / legacy).
 
 This module is the **last block**: it takes the **query** and **GARDIAN-ordered
 top-k passages**, builds the LLM context, runs the **medical reader** (causal
@@ -109,10 +110,9 @@ Citation protocol (required whenever you use passage content):
 
 If you cannot answer from the passages, reply with a single line: I don't know
 
-When passage metadata includes dense/sparse/kg evidence scores, use them as reliability signals:
+When passage metadata includes dense/sparse evidence scores, use them as reliability signals:
 - sparse: lexical overlap / exact terminology
 - dense: semantic similarity / paraphrase match
-- kg: medical entity-graph support
 Prefer passages whose evidence profile matches the query intent."""
 
 # PubMedQA-style yes/no RAG: the generic SYSTEM_PROMPT encourages "I don't know" + long summaries
@@ -129,11 +129,19 @@ Rules:
 - If evidence is weak or conflicting across passages, end with Answer: maybe (do not reply with only "I don't know").
 - Do not repeat the same sentence. Do not paste the question back as the answer.
 
-When passage metadata includes dense/sparse/kg evidence scores, use them as reliability signals:
+When passage metadata includes dense/sparse evidence scores, use them as reliability signals:
 - sparse: lexical overlap / exact terminology
 - dense: semantic similarity / paraphrase match
-- kg: medical entity-graph support
 Prefer passages whose evidence profile matches the query intent."""
+
+# Shorter template: less citation churn, clearer verdict (better for 8B causal readers).
+SYSTEM_PROMPT_YESNO_RAG_COMPACT = """You are answering a PubMedQA yes/no/maybe question using ONLY the passages below.
+
+Rules:
+- One or two short sentences of reasoning; cite supporting facts with [P1], [P2], etc.
+- The LAST line must be exactly: Answer: yes, Answer: no, or Answer: maybe.
+- Use maybe only if passages clearly conflict or are insufficient.
+- Do not list every passage; focus on evidence for the final label."""
 
 SYSTEM_PROMPT_MCQ_RAG = """You are a biomedical assistant answering a multiple-choice medical exam question (MedMCQA-style).
 You are given the question, its answer options (A/B/C/D…), and several reference passages.
@@ -147,7 +155,7 @@ Rules:
   Example: Answer: B — Distal ischaemia affecting the skin of the toes
 - Use Answer: UNSURE — I don't know only when no option is supported by the passages (not when you are merely less confident).
 
-When passage metadata includes dense/sparse/kg evidence scores, treat them as weak reliability hints (sparse=lexical, dense=semantic, kg=graph)."""
+When passage metadata includes dense/sparse evidence scores, treat them as weak reliability hints (sparse=lexical, dense=semantic)."""
 
 SYSTEM_PROMPT_LLM_ONLY_MCQ = """You are a biomedical assistant answering a multiple-choice medical exam question.
 Use your training knowledge. The question lists all options with letters.
@@ -188,23 +196,20 @@ def build_query_routing_note(
     question_type: Optional[str],
     alpha_sparse: Optional[float],
     alpha_dense: Optional[float],
-    alpha_kg: Optional[float],
+    alpha_kg: Optional[float] = None,
 ) -> str:
-    """
-    Build a query-adaptive routing note for the reader.
-    """
-    if alpha_sparse is None or alpha_dense is None or alpha_kg is None:
+    """Build a query-adaptive routing note for the reader (text-only: sparse + dense)."""
+    if alpha_sparse is None or alpha_dense is None:
         return "Routing note: no explicit branch weights provided."
-    triples = [
+    pairs = [
         ("sparse", float(alpha_sparse)),
         ("dense", float(alpha_dense)),
-        ("kg", float(alpha_kg)),
     ]
-    primary = sorted(triples, key=lambda x: x[1], reverse=True)[0][0]
+    primary = sorted(pairs, key=lambda x: x[1], reverse=True)[0][0]
     qtype = (question_type or "other").strip().lower()
     return (
         f"Routing note: question_type={qtype}; controller_weights="
-        f"(sparse={alpha_sparse:.3f}, dense={alpha_dense:.3f}, kg={alpha_kg:.3f}); "
+        f"(sparse={alpha_sparse:.3f}, dense={alpha_dense:.3f}); "
         f"primary_signal={primary}. Prefer passages with stronger {primary} evidence."
     )
 
@@ -297,12 +302,32 @@ def load_sparse_retriever(
     return BM25Retriever(index_dir=dir_path)
 
 
+def resolve_faiss_use_gpu(
+    cfg: Any,
+    *,
+    device: str,
+    for_qa: bool = False,
+    override: Optional[bool] = None,
+) -> bool:
+    """Whether to put the FAISS index on GPU (dense ANN only; query encoder may still use CUDA)."""
+    if override is not None:
+        return bool(override) and device == "cuda"
+    if for_qa and cfg is not None and getattr(cfg, "qa", None) is not None:
+        if "faiss_use_gpu" in cfg.qa:
+            return bool(cfg.qa.faiss_use_gpu) and device == "cuda"
+    if cfg is not None:
+        return bool(getattr(cfg.retrieval, "faiss_use_gpu", True)) and device == "cuda"
+    return device == "cuda"
+
+
 def load_dense_retriever(
     cfg: Any = None,
     *,
     faiss_index_path: Optional[str] = None,
     meta_path: Optional[str] = None,
     device: Optional[str] = None,
+    use_faiss_gpu: Optional[bool] = None,
+    for_qa: bool = False,
 ) -> "DenseRetriever":
     """Load FAISS dense index from ``data/indices/faiss/unified/faiss.index``."""
     from src.retrieval.dense import DenseRetriever
@@ -320,6 +345,10 @@ def load_dense_retriever(
     max_length = int(getattr(enc, "max_length", 512))
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_faiss_gpu = resolve_faiss_use_gpu(
+        cfg, device=device, for_qa=for_qa, override=use_faiss_gpu
+    )
+    faiss_gpu_id = int(getattr(cfg.retrieval, "faiss_gpu_id", 0))
     return DenseRetriever(
         faiss_index_path=faiss_path,
         meta_path=meta,
@@ -327,6 +356,8 @@ def load_dense_retriever(
         batch_size=batch_size,
         max_length=max_length,
         device=device,
+        use_faiss_gpu=use_faiss_gpu,
+        faiss_gpu_id=faiss_gpu_id,
     )
 
 
@@ -336,12 +367,24 @@ def load_hybrid_bm25_faiss_retriever(
     device: Optional[str] = None,
     top_k_bm25: Optional[int] = None,
     top_k_dense: Optional[int] = None,
+    use_faiss_gpu: Optional[bool] = None,
+    for_qa: bool = False,
+    bm25_index_dir: Optional[str] = None,
+    faiss_index_path: Optional[str] = None,
+    faiss_meta_path: Optional[str] = None,
 ) -> "HybridBm25FaissRetriever":
-    """BM25 (sparse) + FAISS (dense) hybrid retriever using unified indices."""
+    """BM25 (sparse) + FAISS (dense) hybrid retriever."""
     from src.retrieval.hybrid import HybridBm25FaissRetriever
 
-    bm25 = load_sparse_retriever(cfg)
-    dense = load_dense_retriever(cfg, device=device)
+    bm25 = load_sparse_retriever(cfg, index_dir=bm25_index_dir)
+    dense = load_dense_retriever(
+        cfg,
+        device=device,
+        use_faiss_gpu=use_faiss_gpu,
+        for_qa=for_qa,
+        faiss_index_path=faiss_index_path,
+        meta_path=faiss_meta_path,
+    )
     if cfg is not None:
         top_k_bm25 = int(top_k_bm25 if top_k_bm25 is not None else cfg.retrieval.top_k_bm25)
         top_k_dense = int(top_k_dense if top_k_dense is not None else cfg.retrieval.top_k_faiss)
@@ -352,6 +395,111 @@ def load_hybrid_bm25_faiss_retriever(
         bm25=bm25,
         dense=dense,
         top_k_bm25=top_k_bm25,
+        top_k_dense=top_k_dense,
+    )
+
+
+def load_hybrid_bm25_medcpt_retriever(
+    cfg: Any = None,
+    *,
+    device: Optional[str] = None,
+    top_k_bm25: Optional[int] = None,
+    top_k_medcpt: Optional[int] = None,
+    bm25_index_dir: Optional[str] = None,
+    medcpt_index_dir: Optional[str] = None,
+) -> "HybridBm25MedcptRetriever":
+    """BM25 (sparse) + MedCPT (dense) hybrid retriever."""
+    from src.retrieval.hybrid import HybridBm25MedcptRetriever
+    from src.retrieval.medcpt import MedCPTRetriever
+
+    dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    bm25 = load_sparse_retriever(cfg, index_dir=bm25_index_dir)
+    medcpt_dir = medcpt_index_dir or "data/indices/medcpt/unified"
+    if not MedCPTRetriever.index_ready(medcpt_dir):
+        raise FileNotFoundError(f"MedCPT index not found/ready: {medcpt_dir}")
+    medcpt = MedCPTRetriever(
+        index_path=medcpt_dir,
+        article_encoder=cfg.retrieval.get(
+            "medcpt_article_encoder", "ncbi/MedCPT-Article-Encoder"
+        )
+        if cfg is not None
+        else "ncbi/MedCPT-Article-Encoder",
+        query_encoder=cfg.retrieval.get(
+            "medcpt_query_encoder", "ncbi/MedCPT-Query-Encoder"
+        )
+        if cfg is not None
+        else "ncbi/MedCPT-Query-Encoder",
+        device=dev,
+        batch_size=int(cfg.retrieval.get("medcpt_batch_size", 256)) if cfg else 256,
+        max_length=int(cfg.retrieval.get("medcpt_max_length", 512)) if cfg else 512,
+    )
+    if cfg is not None:
+        top_k_bm25 = int(top_k_bm25 if top_k_bm25 is not None else cfg.retrieval.top_k_bm25)
+        top_k_medcpt = int(
+            top_k_medcpt if top_k_medcpt is not None else cfg.retrieval.get("top_k_medcpt", 50)
+        )
+    else:
+        top_k_bm25 = int(top_k_bm25 or 50)
+        top_k_medcpt = int(top_k_medcpt or 50)
+    return HybridBm25MedcptRetriever(
+        bm25=bm25,
+        medcpt=medcpt,
+        top_k_bm25=top_k_bm25,
+        top_k_medcpt=top_k_medcpt,
+    )
+
+
+def load_hybrid_spladepp_faiss_retriever(
+    cfg: Any = None,
+    *,
+    device: Optional[str] = None,
+    top_k_spladepp: Optional[int] = None,
+    top_k_dense: Optional[int] = None,
+    use_faiss_gpu: Optional[bool] = None,
+    for_qa: bool = False,
+    spladepp_index_dir: Optional[str] = None,
+    faiss_index_path: Optional[str] = None,
+    faiss_meta_path: Optional[str] = None,
+) -> "HybridSpladePPFaissRetriever":
+    """SPLADE++ (sparse) + FAISS (dense) hybrid retriever."""
+    from src.retrieval.hybrid import HybridSpladePPFaissRetriever
+    from src.retrieval.spladepp import SpladePPRetriever
+
+    dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    splade_dir = spladepp_index_dir or "data/indices/spladepp/unified"
+    if not SpladePPRetriever.index_ready(splade_dir):
+        raise FileNotFoundError(f"SPLADE++ index not found/ready: {splade_dir}")
+    spladepp = SpladePPRetriever(
+        index_path=splade_dir,
+        model_name=cfg.retrieval.get(
+            "spladepp_encoder", "naver/splade-cocondenser-ensembledistil"
+        )
+        if cfg is not None
+        else "naver/splade-cocondenser-ensembledistil",
+        device=dev,
+        batch_size=int(cfg.retrieval.get("spladepp_batch_size", 64)) if cfg else 64,
+        max_length=int(cfg.retrieval.get("spladepp_max_length", 256)) if cfg else 256,
+    )
+    dense = load_dense_retriever(
+        cfg,
+        device=dev,
+        use_faiss_gpu=use_faiss_gpu,
+        for_qa=for_qa,
+        faiss_index_path=faiss_index_path,
+        meta_path=faiss_meta_path,
+    )
+    if cfg is not None:
+        top_k_spladepp = int(
+            top_k_spladepp if top_k_spladepp is not None else cfg.retrieval.get("top_k_spladepp", 50)
+        )
+        top_k_dense = int(top_k_dense if top_k_dense is not None else cfg.retrieval.top_k_faiss)
+    else:
+        top_k_spladepp = int(top_k_spladepp or 50)
+        top_k_dense = int(top_k_dense or 50)
+    return HybridSpladePPFaissRetriever(
+        spladepp=spladepp,
+        dense=dense,
+        top_k_spladepp=top_k_spladepp,
         top_k_dense=top_k_dense,
     )
 
@@ -369,11 +517,21 @@ def retrieve_hybrid_candidates(
     return candidates
 
 
-def build_retriever_for_qa(cfg: Any, retriever_name: str, *, device: Optional[str] = None):
+def build_retriever_for_qa(
+    cfg: Any,
+    retriever_name: str,
+    *,
+    device: Optional[str] = None,
+    use_faiss_gpu: Optional[bool] = None,
+    dataset_name: Optional[str] = None,
+    use_per_dataset_indices: bool = True,
+):
     """
     Build the hybrid retriever for a canonical family name.
 
-    ``hybrid`` / ``hybrid_bm25_faiss`` → unified BM25 + FAISS indices.
+    ``hybrid`` / ``hybrid_bm25_faiss`` → BM25 + FAISS.
+    ``hybrid_bm25_medcpt`` → BM25 + MedCPT.
+    ``hybrid_spladepp_faiss`` → SPLADE++ + FAISS.
     ``hybrid_neural`` / ``hybrid_spladepp_medcpt`` → SPLADE++ + MedCPT.
     """
     from src.common.rank_data_paths import normalize_retriever_name
@@ -381,13 +539,45 @@ def build_retriever_for_qa(cfg: Any, retriever_name: str, *, device: Optional[st
     from src.retrieval.medcpt import MedCPTRetriever
     from src.retrieval.spladepp import SpladePPRetriever
 
+    from src.retrieval.index_paths import resolve_retrieval_paths_for_qa
+
     canonical = normalize_retriever_name(retriever_name)
     dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    if canonical == "hybrid_bm25_faiss":
-        return load_hybrid_bm25_faiss_retriever(cfg, device=dev)
-    if canonical == "hybrid_spladepp_medcpt":
+    idx_paths = resolve_retrieval_paths_for_qa(
+        cfg,
+        dataset_name=dataset_name,
+        use_per_dataset=use_per_dataset_indices,
+    )
+    if canonical in ("hybrid", "hybrid_bm25_faiss"):
+        return load_hybrid_bm25_faiss_retriever(
+            cfg,
+            device=dev,
+            use_faiss_gpu=use_faiss_gpu,
+            for_qa=True,
+            bm25_index_dir=idx_paths["bm25_index_dir"],
+            faiss_index_path=idx_paths["faiss_index"],
+            faiss_meta_path=idx_paths["faiss_meta"],
+        )
+    if canonical == "hybrid_bm25_medcpt":
+        return load_hybrid_bm25_medcpt_retriever(
+            cfg,
+            device=dev,
+            bm25_index_dir=idx_paths["bm25_index_dir"],
+            medcpt_index_dir=idx_paths["medcpt_dir"],
+        )
+    if canonical == "hybrid_spladepp_faiss":
+        return load_hybrid_spladepp_faiss_retriever(
+            cfg,
+            device=dev,
+            use_faiss_gpu=use_faiss_gpu,
+            for_qa=True,
+            spladepp_index_dir=idx_paths["spladepp_dir"],
+            faiss_index_path=idx_paths["faiss_index"],
+            faiss_meta_path=idx_paths["faiss_meta"],
+        )
+    if canonical in ("hybrid_neural", "hybrid_spladepp_medcpt"):
         spladepp = SpladePPRetriever(
-            index_path="data/indices/spladepp/unified",
+            index_path=idx_paths["spladepp_dir"],
             model_name=cfg.retrieval.get(
                 "spladepp_encoder", "naver/splade-cocondenser-ensembledistil"
             ),
@@ -396,7 +586,7 @@ def build_retriever_for_qa(cfg: Any, retriever_name: str, *, device: Optional[st
             max_length=int(cfg.retrieval.get("spladepp_max_length", 256)),
         )
         medcpt = MedCPTRetriever(
-            index_path="data/indices/medcpt/unified",
+            index_path=idx_paths["medcpt_dir"],
             article_encoder=cfg.retrieval.get(
                 "medcpt_article_encoder", "ncbi/MedCPT-Article-Encoder"
             ),
@@ -415,7 +605,7 @@ def build_retriever_for_qa(cfg: Any, retriever_name: str, *, device: Optional[st
         )
     raise ValueError(
         f"Unsupported retriever {retriever_name!r} (canonical={canonical!r}). "
-        "Use hybrid_bm25_faiss or hybrid_spladepp_medcpt."
+        "Use hybrid_bm25_faiss, hybrid_bm25_medcpt, hybrid_spladepp_faiss, or hybrid_spladepp_medcpt."
     )
 
 
@@ -531,16 +721,33 @@ def _extract_final_answer(generation: str) -> str:
     return generation.strip()
 
 
-def _is_weak_answer(text: str) -> bool:
+def _pubmedqa_answer_needs_cite_retry(text: str, reader_task: str) -> bool:
+    """PubMedQA RAG answers must include [P#] tags; verdict-only lines trigger retry."""
+    rt = (reader_task or "open").strip().lower()
+    if rt != "yesno":
+        return False
+    if re.search(r"\[P\d+\]", text or "", re.I):
+        return False
+    if re.search(r"(?i)\banswer\s*:\s*(yes|no|maybe)\b", text or ""):
+        return True
+    if re.match(r"^(yes|no|maybe)[\s.!?,;:]*$", (text or "").strip(), re.I):
+        return True
+    return len((text or "").strip()) < 48
+
+
+def _is_weak_answer(text: str, *, reader_task: str = "open") -> bool:
     """Detect near-empty or citation-only answers that need fallback regeneration."""
     if not text or not text.strip():
         return True
+    if _pubmedqa_answer_needs_cite_retry(text, reader_task):
+        return True
     t = text.strip().lower()
-    # PubMedQA-style verdicts are intentionally short; do not discard as "weak".
-    if re.match(r"^(yes|no|maybe)[\s.!?,;:]*$", t):
+    # PubMedQA with inline citations + verdict: not weak.
+    if re.search(r"\[P\d+\]", text or "", re.I) and re.search(
+        r"(?i)\banswer\s*:\s*(yes|no|maybe)\b", text or ""
+    ):
         return False
-    if re.match(r"^(?:answer|label)\s*:\s*(yes|no|maybe)[\s.!?,;:]*$", t):
-        return False
+    t_raw = text.strip()
     t_raw = text.strip()
     # MedMCQA-style "Answer: B — option text" (last line often short but valid).
     if re.match(r"(?i)^answer\s*:\s*[a-d]\s*[—\-–]\s*\S", t_raw):
@@ -752,6 +959,22 @@ def prepare_reader_tokenizer(tokenizer) -> None:
     """Causal LMs often lack pad_token; HF generate expects pad_token_id."""
     if getattr(tokenizer, "pad_token_id", None) is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token
+    # BPE tokenizers (Llama, etc.): WordPiece cleanup corrupts output and spams warnings.
+    try:
+        tokenizer.clean_up_tokenization_spaces = False
+    except Exception:
+        pass
+
+
+def _sanitize_reader_generation_config(model: torch.nn.Module) -> None:
+    """Drop default max_length so per-call max_new_tokens does not conflict (HF warning)."""
+    gc = getattr(model, "generation_config", None)
+    if gc is None:
+        return
+    try:
+        gc.max_length = None
+    except Exception:
+        pass
 
 
 def format_prompt_for_reader(
@@ -795,7 +1018,12 @@ def format_prompt_for_reader(
     return f"<s>[INST] {combined} [/INST]"
 
 
-def load_hf_reader(model_name: str, device: str) -> Tuple[Any, torch.nn.Module]:
+def load_hf_reader(
+    model_name: str,
+    device: str,
+    *,
+    load_in_4bit: bool = False,
+) -> Tuple[Any, torch.nn.Module]:
     """
     Load ``AutoTokenizer`` + reader weights.
 
@@ -803,24 +1031,64 @@ def load_hf_reader(model_name: str, device: str) -> Tuple[Any, torch.nn.Module]:
     (BioMistral, Llama, Mistral, …), so Mistral-based checkpoints do not hit a noisy
     failed ``AutoModelForSeq2SeqLM`` attempt. If ``model_type`` is missing, falls back to
     the legacy try-seq2seq-then-causal path.
+
+    When ``load_in_4bit`` is True (CUDA only), loads causal readers with bitsandbytes NF4
+    and ``device_map="auto"`` (for large models such as Qwen2.5-32B).
     """
+    if load_in_4bit and device != "cuda":
+        raise ValueError("load_in_4bit requires CUDA")
     dtype = torch.float16 if device == "cuda" else torch.float32
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     prepare_reader_tokenizer(tokenizer)
+    try:
+        from transformers.utils import logging as hf_logging
+
+        hf_logging.set_verbosity_error()
+    except Exception:
+        pass
 
     cfg = AutoConfig.from_pretrained(model_name)
     mt = (getattr(cfg, "model_type", None) or "").strip().lower()
 
     def _load_seq2seq() -> torch.nn.Module:
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, torch_dtype=dtype)
+        if load_in_4bit:
+            raise ValueError(
+                f"4-bit loading is only supported for causal LMs, not Seq2Seq ({model_name!r})"
+            )
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, dtype=dtype)
         model.to(device)
         model.eval()
+        _sanitize_reader_generation_config(model)
         return model
 
     def _load_causal() -> torch.nn.Module:
-        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype)
+        if load_in_4bit:
+            try:
+                from transformers import BitsAndBytesConfig
+            except ImportError as exc:
+                raise ImportError(
+                    "bitsandbytes is required for load_in_4bit "
+                    "(pip install bitsandbytes)"
+                ) from exc
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+            )
+            logger.info(f"Loading reader in 4-bit NF4 (device_map=auto): {model_name}")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                quantization_config=bnb_config,
+                device_map="auto",
+            )
+            model.eval()
+            _sanitize_reader_generation_config(model)
+            return model
+        model = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype)
         model.to(device)
         model.eval()
+        _sanitize_reader_generation_config(model)
         return model
 
     if mt in _SEQ2SEQ_MODEL_TYPES:
@@ -878,6 +1146,7 @@ def build_rag_prompt_split(
     question_type: Optional[str] = None,
     *,
     reader_task: str = "open",
+    yesno_compact: bool = False,
 ) -> Tuple[str, str]:
     """
     System/user split for RAG. ``reader_task`` selects the template: ``mcq`` (MedMCQA)
@@ -888,8 +1157,12 @@ def build_rag_prompt_split(
     rt = (reader_task or "open").strip().lower()
     if rt == "mcq":
         sys_block = SYSTEM_PROMPT_MCQ_RAG
-    elif (question_type or "").strip().lower() == "yesno":
-        sys_block = SYSTEM_PROMPT_YESNO_RAG
+    elif (question_type or "").strip().lower() == "yesno" or rt == "yesno":
+        sys_block = (
+            SYSTEM_PROMPT_YESNO_RAG_COMPACT
+            if yesno_compact
+            else SYSTEM_PROMPT_YESNO_RAG
+        )
     else:
         sys_block = SYSTEM_PROMPT
     system = f"{sys_block}{routing}".strip()
@@ -955,7 +1228,7 @@ def reader_generate(
     if pad_id is None:
         pad_id = tokenizer.eos_token_id
     gen_kw: Dict[str, Any] = {
-        "max_new_tokens": max_new_tokens,
+        "max_new_tokens": int(max_new_tokens),
         "do_sample": False,
     }
     if pad_id is not None:
@@ -1041,6 +1314,8 @@ def run_reader_rag_block(
     use_react: bool = False,
     react_max_steps: int = 6,
     react_tokens_per_step: Optional[int] = None,
+    yesno_compact: bool = False,
+    cfg: Any = None,
 ) -> str:
     """
     One-call **last block**: format context → build prompt → ``generate``.
@@ -1071,86 +1346,32 @@ def run_reader_rag_block(
             react_max_steps=react_max_steps,
             react_tokens_per_step=react_tokens_per_step,
         )
-    context = format_reader_context(
-        passages_top_k,
-        top_k=top_k_passages,
-        max_chars_per_passage=max_chars_per_passage,
-        include_signal_features=include_signal_features,
-    )
+    from src.pipeline.rag.reader import RAGReader, reader_task_from_name
+    from src.pipeline.rag.reader_types import ReaderConfig
+
     routing_note = build_query_routing_note(
         question_type=question_type,
         alpha_sparse=alpha_sparse,
         alpha_dense=alpha_dense,
         alpha_kg=alpha_kg,
     )
-    sys_p, usr_p = build_rag_prompt_split(
-        question,
-        context,
-        routing_note=routing_note,
-        question_type=question_type,
-        reader_task=reader_task,
-    )
-    prompt = format_prompt_for_reader(tokenizer, reader_model, sys_p, usr_p, instruct_wrap=True)
-    rep_pen, ngram = _t5_yesno_decode_controls(reader_model, question_type, reader_task=reader_task)
-    answer = reader_generate(
-        tokenizer,
-        reader_model,
-        prompt,
-        device,
-        max_new_tokens=max_new_tokens,
-        max_input_length=max_input_length,
-        repetition_penalty=rep_pen,
-        no_repeat_ngram_size=ngram,
-    )
-    answer = ensure_yesno_verdict_line(answer or "", reader_task=reader_task)
-    if answer and not _is_weak_answer(answer):
-        return answer.strip()
-
-    # Fallback for occasional empty generations (e.g., immediate EOS):
-    # shrink context and simplify prompt to force a concise answer.
-    fallback_context = format_reader_context(
-        passages_top_k,
-        top_k=max(1, min(3, top_k_passages)),
-        max_chars_per_passage=max(350, max_chars_per_passage // 2),
-        include_signal_features=False,
-    )
-    rt_fb = (reader_task or "open").strip().lower()
-    is_yesno = rt_fb == "yesno"
-    if is_yesno:
-        sys_fb = SYSTEM_PROMPT_YESNO_RAG.strip()
-    elif rt_fb == "mcq":
-        sys_fb = SYSTEM_PROMPT_MCQ_RAG.strip()
+    if cfg is not None:
+        reader_cfg = ReaderConfig.from_cfg(cfg)
+        reader_cfg.top_k_passages = min(int(top_k_passages), reader_cfg.top_k_passages)
+        reader_cfg.max_chars_per_passage = int(max_chars_per_passage)
+        reader_cfg.max_input_length = int(max_input_length)
+        reader_cfg.include_signal_features = bool(include_signal_features)
     else:
-        sys_fb = (
-            "You are a helpful medical assistant.\n"
-            "Answer using only the provided passages. If insufficient evidence, say \"I don't know\".\n"
-            "End each supported sentence with [P#] citations; final line: Sources: [P1],..."
-        ).strip()
-    usr_fb = (
-        f"Passages:\n{fallback_context}\n\nQuestion: {question}\nAnswer:"
-        if (is_yesno or rt_fb == "mcq")
-        else (
-            f"Passages:\n{fallback_context}\n\n"
-            f"Question: {question}\n"
-            "Write at least 3 informative sentences. Explain mechanism and trial evidence if present.\n"
-            "Answer:"
+        reader_cfg = ReaderConfig(
+            top_k_passages=int(top_k_passages),
+            max_chars_per_passage=int(max_chars_per_passage),
+            max_input_length=int(max_input_length),
+            include_signal_features=bool(include_signal_features),
         )
-    )
-    fallback_prompt = format_prompt_for_reader(
-        tokenizer, reader_model, sys_fb, usr_fb.strip(), instruct_wrap=True
-    )
-    fallback_answer = reader_generate(
-        tokenizer,
-        reader_model,
-        fallback_prompt,
-        device,
-        max_new_tokens=max(96, max_new_tokens),
-        max_input_length=max_input_length,
-        repetition_penalty=rep_pen,
-        no_repeat_ngram_size=ngram,
-    )
-    clean = ensure_yesno_verdict_line(
-        fallback_answer.strip() if fallback_answer else "",
-        reader_task=reader_task,
-    )
-    return clean if not _is_weak_answer(clean) else "I don't know"
+    reader = RAGReader(tokenizer, reader_model, device, config=reader_cfg)
+    return reader.run(
+        question=question,
+        passages=passages_top_k,
+        task=reader_task_from_name(reader_task),
+        routing_note=routing_note,
+    ).raw

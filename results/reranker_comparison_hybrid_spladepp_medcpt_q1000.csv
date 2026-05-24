@@ -1,0 +1,13 @@
+retriever,dataset,system,ndcg@10,ndcg@20,ndcg@50,mrr,recall@10,recall@20,hit@10
+hybrid_spladepp_medcpt,pubmedqa_labeled,hybrid,0.914069,0.930065,0.938730,0.991618,0.920557,0.963636,0.999000
+hybrid_spladepp_medcpt,pubmedqa_labeled,rrf,0.903553,0.921760,0.930057,0.987769,0.914640,0.963736,0.999000
+hybrid_spladepp_medcpt,pubmedqa_labeled,gardian,0.923481,0.934793,0.942454,0.989800,0.935783,0.966279,0.998000
+hybrid_spladepp_medcpt,pubmedqa_labeled,cross_encoder_msmarco_minilm,0.857784,0.874506,0.889428,0.980843,0.856424,0.901695,0.994000
+hybrid_spladepp_medcpt,pubmedqa_labeled,cross_encoder_monot5_med,0.912046,0.924237,0.934336,0.986984,0.920481,0.952636,0.997000
+hybrid_spladepp_medcpt,pubmedqa_labeled,cross_encoder_monobert,0.883643,0.898558,0.911254,0.984758,0.885281,0.925795,0.996000
+hybrid_spladepp_medcpt,medmcqa,hybrid,0.429814,0.445321,0.456242,0.377538,0.622000,0.683000,0.622000
+hybrid_spladepp_medcpt,medmcqa,rrf,0.423497,0.449143,0.465018,0.362269,0.652000,0.754000,0.652000
+hybrid_spladepp_medcpt,medmcqa,gardian,0.460336,0.480765,0.493207,0.402591,0.672000,0.753000,0.672000
+hybrid_spladepp_medcpt,medmcqa,cross_encoder_msmarco_minilm,0.448820,0.471950,0.487627,0.398922,0.638000,0.729000,0.638000
+hybrid_spladepp_medcpt,medmcqa,cross_encoder_monot5_med,0.494624,0.517139,0.528733,0.437321,0.704000,0.792000,0.704000
+hybrid_spladepp_medcpt,medmcqa,cross_encoder_monobert,0.481146,0.503380,0.518790,0.427231,0.683000,0.769000,0.683000

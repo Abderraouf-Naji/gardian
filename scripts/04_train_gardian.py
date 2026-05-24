@@ -17,6 +17,10 @@ import torch
 from loguru import logger
 from omegaconf import OmegaConf
 
+from src.common.hybrid_retrievers import (
+    FOCUS_HYBRID_RETRIEVERS,
+    HYBRID_RETRIEVER_COMBINATIONS,
+)
 from src.common.question_types import assert_cfg_question_types
 from src.common.rank_data_paths import (
     normalize_retriever_name,
@@ -27,22 +31,9 @@ from src.common.repro import set_global_seed
 from src.model.gardian import build_gardian_from_model_cfg
 from src.training.trainer import GARDIANTrainer
 
-HYBRID_RETRIEVER_COMBINATIONS = {
-    "hybrid_bm25_faiss": "BM25 + FAISS",
-    "hybrid_bm25_medcpt": "BM25 + MedCPT",
-    "hybrid_spladepp_faiss": "SPLADE++ + FAISS",
-    "hybrid_spladepp_medcpt": "SPLADE++ + MedCPT",
-}
-
-# GARDIAN is trained per hybrid family (one checkpoint per row in the
-# 4-cell hybrid table). Single-retriever names are kept here only so that
-# legacy CLI calls continue to work for ablation runs over already-existing
-# rank-data; they are NOT iterated when ``--retriever all`` is used.
+# Single-retriever names kept for legacy CLI; not used when ``--retriever all``.
 ALL_TRAIN_RETRIEVERS = [
-    "hybrid_bm25_faiss",
-    "hybrid_bm25_medcpt",
-    "hybrid_spladepp_faiss",
-    "hybrid_spladepp_medcpt",
+    *FOCUS_HYBRID_RETRIEVERS,
     "spladepp",
     "bm25",
     "faiss",
@@ -126,8 +117,14 @@ def _validate_feature_dims(path: str, cfg) -> None:
                 raise ValueError(f"{path}:{idx} sparse dim mismatch")
             if len(rec.get("dense_feats", [])) != expected_dense:
                 raise ValueError(f"{path}:{idx} dense dim mismatch")
-            if len(rec.get("kg_feats", [])) != expected_kg:
-                raise ValueError(f"{path}:{idx} kg dim mismatch")
+            if expected_kg > 0:
+                if len(rec.get("kg_feats", [])) != expected_kg:
+                    raise ValueError(f"{path}:{idx} kg dim mismatch")
+            elif rec.get("kg_feats"):
+                raise ValueError(
+                    f"{path}:{idx} kg_feats present but model.kg_feat_dim=0 (text-only); "
+                    "regenerate rank data with --text-only or strip kg_feats"
+                )
             if "query_emb" in rec and len(rec.get("query_emb", [])) != expected_query:
                 raise ValueError(f"{path}:{idx} query_emb dim mismatch")
             if len(rec.get("qtype_onehot", [])) != expected_qtypes:
@@ -233,9 +230,18 @@ def main():
         default=None,
         help="Optional override for model.dropout.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override cfg.seed for this run (e.g. multiseed experiments).",
+    )
     args = parser.parse_args()
 
     cfg = OmegaConf.load("configs/base.yaml")
+    if args.seed is not None:
+        cfg.seed = int(args.seed)
+        logger.info(f"Overriding cfg.seed -> {cfg.seed}")
     assert_cfg_question_types(cfg.model.question_types)
     if args.epochs is not None:
         if int(args.epochs) <= 0:
@@ -271,14 +277,8 @@ def main():
     # ``--retriever all`` trains GARDIAN once per hybrid family.
     # The four single retrievers (bm25, faiss, spladepp, medcpt) still work
     # when named explicitly for ablation runs.
-    FOCUS_HYBRIDS = [
-        "hybrid_bm25_faiss",
-        "hybrid_bm25_medcpt",
-        "hybrid_spladepp_faiss",
-        "hybrid_spladepp_medcpt",
-    ]
     retrievers = (
-        FOCUS_HYBRIDS
+        FOCUS_HYBRID_RETRIEVERS
         if args.retriever == "all"
         else [normalize_retriever_name(args.retriever)]
     )
@@ -287,7 +287,7 @@ def main():
     summary = {}
 
     logger.info("Hybrid retriever combinations:")
-    for name in FOCUS_HYBRIDS:
+    for name in FOCUS_HYBRID_RETRIEVERS:
         logger.info(f"  - {name}: {HYBRID_RETRIEVER_COMBINATIONS[name]}")
 
     for retriever in retrievers:
@@ -338,6 +338,8 @@ def main():
         logger.info(
             f"Training | epochs={cfg.training.epochs} lr={cfg.training.lr} "
             f"wd={cfg.training.weight_decay} batch={cfg.training.batch_size} "
+            f"warmup_epochs={getattr(cfg.training, 'warmup_epochs', 0)} "
+            f"min_lr_ratio={getattr(cfg.training, 'min_lr_ratio', 0.0)} "
             f"num_negatives={cfg.training.num_negatives} margin={cfg.training.margin} "
             f"hard_negative_top_n={getattr(cfg.training, 'hard_negative_top_n', None)} "
             f"hard_negative_fraction={getattr(cfg.training, 'hard_negative_fraction', 0.0)}"
@@ -367,6 +369,7 @@ def main():
             "best_ndcg@10_so_far",
             "patience_counter",
             "epoch_elapsed_sec",
+            "lr",
         ]
         with open(epoch_csv_path, "w", encoding="utf-8", newline="") as f:
             w = csv.DictWriter(f, fieldnames=csv_fields)

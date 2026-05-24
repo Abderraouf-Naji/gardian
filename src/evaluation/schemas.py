@@ -27,7 +27,7 @@ def validate_evaluation_results(payload: Dict[str, Any]) -> None:
         _require(isinstance(ds_block, dict), f"results.{retriever} must be an object")
         for dataset, sys_block in ds_block.items():
             _require(isinstance(sys_block, dict), f"results.{retriever}.{dataset} must be an object")
-            for name in ["bm25", "dense", "hybrid", "gardian"]:
+            for name in ["sparse", "dense", "hybrid", "rrf", "gardian"]:
                 _require(name in sys_block, f"results.{retriever}.{dataset} missing '{name}'")
                 _validate_metric_block(sys_block[name], f"results.{retriever}.{dataset}.{name}")
 
@@ -47,6 +47,14 @@ def validate_paper_bundle(payload: Dict[str, Any]) -> None:
                     eval_block["gardian"],
                     f"paper results.{retriever}.{dataset}.{ablation}.gardian",
                 )
+    qta = payload.get("question_type_analysis")
+    if qta is not None:
+        _require(isinstance(qta, dict), "question_type_analysis must be an object")
+        for retriever, ds_block in qta.items():
+            _require(isinstance(ds_block, dict), f"question_type_analysis.{retriever} must be object")
+            for dataset, block in ds_block.items():
+                _require(isinstance(block, dict), f"question_type_analysis.{retriever}.{dataset} must be object")
+                _require("by_type" in block, f"question_type_analysis.{retriever}.{dataset} missing by_type")
 
 
 def validate_controller_weights(payload: Dict[str, Any]) -> None:
