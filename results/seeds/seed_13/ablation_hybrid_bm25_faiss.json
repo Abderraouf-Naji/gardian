@@ -1,0 +1,1920 @@
+{
+  "meta": {
+    "created_utc": "2026-09-18T14:57:44.133325+00:00",
+    "git_revision": "a13519e51c781b26f2f14efab241ebf8a698ebdf",
+    "config": {
+      "seed": 42,
+      "seeds": [
+        13,
+        21,
+        42,
+        87,
+        100
+      ],
+      "paths": {
+        "corpus_jsonl": "data/corpus.jsonl",
+        "bm25_index": "data/indices/bm25/unified",
+        "bm25_index_pkl": "data/indices/bm25/unified/index.pkl",
+        "faiss_index": "data/indices/faiss/unified/faiss.index",
+        "faiss_meta": "data/indices/faiss/unified/faiss_meta.jsonl",
+        "rank_data_train": "data/rank_data_train.jsonl",
+        "rank_data_dev": "data/rank_data_dev.jsonl",
+        "results_dir": "results/"
+      },
+      "corpus": {
+        "total_passages": 3000000,
+        "train_fraction": 0.8,
+        "val_fraction": 0.1,
+        "test_fraction": 0.1,
+        "pubmedqa_artificial_target_passages": 1500000,
+        "medmcqa_target_passages": 450000
+      },
+      "retrieval": {
+        "top_k_bm25": 50,
+        "top_k_faiss": 50,
+        "top_k_spladepp": 50,
+        "top_k_medcpt": 50,
+        "adaptive_channel_budget": "proportional",
+        "candidate_pool_size": 100,
+        "faiss_use_gpu": true,
+        "faiss_gpu_id": 0,
+        "spladepp_encoder": "naver/splade-cocondenser-ensembledistil",
+        "spladepp_batch_size": 64,
+        "spladepp_max_length": 256,
+        "medcpt_article_encoder": "ncbi/MedCPT-Article-Encoder",
+        "medcpt_query_encoder": "ncbi/MedCPT-Query-Encoder",
+        "medcpt_batch_size": 256,
+        "medcpt_max_length": 512,
+        "cross_encoder_backend": "auto",
+        "cross_encoder_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "cross_encoder_batch_size": 32,
+        "cross_encoder_max_length": 512,
+        "cross_encoder_fp16": true
+      },
+      "encoder": {
+        "model_name": "NeuML/pubmedbert-base-embeddings",
+        "batch_size": 512,
+        "max_length": 128
+      },
+      "model": {
+        "sparse_feat_dim": 8,
+        "dense_feat_dim": 8,
+        "dropped_features": [],
+        "controller_inputs": [
+          "query_emb"
+        ],
+        "normalize_branches": false,
+        "use_controller": true,
+        "branch_hidden": 2048,
+        "controller_hidden": 2048,
+        "query_feat_dim": 768,
+        "dropout": 0.12
+      },
+      "training": {
+        "epochs": 10,
+        "batch_size": 64,
+        "lr": 0.001,
+        "weight_decay": 0.00015,
+        "margin": 1.0,
+        "warmup_epochs": 3,
+        "min_lr_ratio": 0.08,
+        "loss": "lambdarank",
+        "listwise_group_size": 64,
+        "listwise_ndcg_k": 10,
+        "lambdarank_sigma": 1.0,
+        "approxndcg_temperature": 1.0,
+        "early_stopping_patience": 6,
+        "eval_metric": "ndcg@10",
+        "num_negatives": 48,
+        "hard_negative_top_n": 120,
+        "hard_negative_fraction": 0.85,
+        "max_pairs_per_query": 48,
+        "precompute_query_emb": true,
+        "query_encoder_batch_size": 1024,
+        "eval_batch_size": 8192,
+        "query_emb_cache_path": null,
+        "query_emb_cache_max_entries": 500000,
+        "num_workers": 2,
+        "shuffle_buffer": 20000,
+        "cudnn_deterministic": true
+      },
+      "evaluation": {
+        "cutoffs": [
+          5,
+          10,
+          20
+        ],
+        "question_type_breakdown": true,
+        "question_types": [
+          "diagnosis",
+          "treatment",
+          "mechanism",
+          "contraindication",
+          "factoid",
+          "yesno",
+          "other"
+        ]
+      },
+      "qa": {
+        "gardian_adaptive_retrieval": true,
+        "use_per_dataset_indices": true,
+        "pubmedqa_rag_mode": "gold_context",
+        "rag_yesno_compact": false,
+        "yesno_top_k_passages": 10,
+        "mcq_top_k_passages": 10,
+        "faiss_use_gpu": false,
+        "reader_model": "meta-llama/Meta-Llama-3-8B-Instruct",
+        "reader_max_input_length": 8192,
+        "top_k_passages": 10,
+        "max_chars_per_passage": 800,
+        "max_new_tokens_yesno": 300,
+        "max_new_tokens_mcq": 320,
+        "max_new_tokens": 256,
+        "require_citations_yesno": true,
+        "require_citations_mcq": true,
+        "reader_repetition_penalty": 1.12,
+        "reader_no_repeat_ngram_size": 4,
+        "reader_include_signal_features": false,
+        "reader_max_citations_yesno": 6,
+        "reader_max_citations_mcq": 4,
+        "yesno_prompt": "v1_permissive",
+        "hybrid_balanced_top_k": false,
+        "rq4_align_retrieval_top_k": true,
+        "rq4_full_union_pool": true,
+        "reader_react": false,
+        "reader_react_max_steps": 6,
+        "reader_react_tokens_per_step": null
+      }
+    },
+    "bootstrap_samples": 2000,
+    "seed": 13,
+    "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+    "python_version": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "retrievers": [
+      "hybrid_bm25_faiss"
+    ],
+    "randomization_trials": 10000,
+    "parallel_workers": 1,
+    "cuda_devices": [
+      0
+    ],
+    "ablations": [
+      "full",
+      "fixed_alpha",
+      "no_sparse_signal",
+      "no_dense_signal",
+      "oracle_branch",
+      "uniform_alpha"
+    ]
+  },
+  "results": {
+    "hybrid_bm25_faiss": {
+      "pubmedqa_labeled": {
+        "full": {
+          "gardian": {
+            "ndcg@5": 0.8791350493490021,
+            "ndcg@10": 0.9088200829231551,
+            "ndcg@20": 0.9234732182212173,
+            "ndcg@50": 0.9318164263435176,
+            "ndcg@100": 0.9332174093356721,
+            "recall@5": 0.8599785714285714,
+            "recall@10": 0.924947619047619,
+            "recall@20": 0.9661833333333333,
+            "recall@50": 0.9947166666666666,
+            "recall@100": 1.0,
+            "hit@5": 0.991,
+            "hit@10": 0.994,
+            "hit@20": 0.999,
+            "hit@50": 1.0,
+            "mrr": 0.981730310150376,
+            "mrr@10": 0.981730310150376,
+            "ndcg@10_query_mean": 0.9088200829231551,
+            "ndcg@10_bootstrap_ci95": [
+              0.8991101652783404,
+              0.91787653833728
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.8680758775245686,
+              0.8898166853528259
+            ],
+            "ndcg@5_query_mean": 0.8791350493490021,
+            "ndcg@20_bootstrap_ci95": [
+              0.915271512446732,
+              0.9308736806653476
+            ],
+            "ndcg@20_query_mean": 0.9234732182212173,
+            "ndcg@50_bootstrap_ci95": [
+              0.9248718915977678,
+              0.9384265905932777
+            ],
+            "ndcg@50_query_mean": 0.9318164263435176,
+            "ndcg@100_bootstrap_ci95": [
+              0.926375543067372,
+              0.9397783778674101
+            ],
+            "ndcg@100_query_mean": 0.9332174093356721,
+            "recall@5_bootstrap_ci95": [
+              0.8471823809523809,
+              0.8725407142857142
+            ],
+            "recall@5_query_mean": 0.8599785714285714,
+            "recall@20_bootstrap_ci95": [
+              0.95886625,
+              0.9729179166666666
+            ],
+            "recall@20_query_mean": 0.9661833333333333,
+            "recall@50_bootstrap_ci95": [
+              0.9924166666666667,
+              0.99678375
+            ],
+            "recall@50_query_mean": 0.9947166666666666,
+            "recall@100_bootstrap_ci95": [
+              1.0,
+              1.0
+            ],
+            "recall@100_query_mean": 1.0,
+            "mrr_bootstrap_ci95": [
+              0.9742308756265664,
+              0.9885501848370927
+            ],
+            "mrr_query_mean": 0.981730310150376
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_labeled_eval.jsonl",
+            "query_count": 1000,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": null,
+            "gardian_no_positive_queries": 0,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {}
+        },
+        "fixed_alpha": {
+          "gardian": {
+            "ndcg@5": 0.8759971488512709,
+            "ndcg@10": 0.9050861171823679,
+            "ndcg@20": 0.9198972994721081,
+            "ndcg@50": 0.9287870378355417,
+            "ndcg@100": 0.9305850462828871,
+            "recall@5": 0.858045238095238,
+            "recall@10": 0.9217714285714285,
+            "recall@20": 0.9627904761904763,
+            "recall@50": 0.9928333333333333,
+            "recall@100": 1.0,
+            "hit@5": 0.992,
+            "hit@10": 0.994,
+            "hit@20": 0.998,
+            "hit@50": 0.999,
+            "mrr": 0.9810995173080049,
+            "mrr@10": 0.9810995173080049,
+            "ndcg@10_query_mean": 0.9050861171823679,
+            "ndcg@10_bootstrap_ci95": [
+              0.8953527875798853,
+              0.914329657785773
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.8651652965479733,
+              0.8869845348886596
+            ],
+            "ndcg@5_query_mean": 0.8759971488512709,
+            "ndcg@20_bootstrap_ci95": [
+              0.9119299239408291,
+              0.9277849950503899
+            ],
+            "ndcg@20_query_mean": 0.9198972994721081,
+            "ndcg@50_bootstrap_ci95": [
+              0.9217756110837949,
+              0.9355166598396979
+            ],
+            "ndcg@50_query_mean": 0.9287870378355417,
+            "ndcg@100_bootstrap_ci95": [
+              0.9238009441684637,
+              0.9373247493765932
+            ],
+            "ndcg@100_query_mean": 0.9305850462828871,
+            "recall@5_bootstrap_ci95": [
+              0.8454254166666667,
+              0.8704763095238095
+            ],
+            "recall@5_query_mean": 0.858045238095238,
+            "recall@20_bootstrap_ci95": [
+              0.955222738095238,
+              0.9697179166666666
+            ],
+            "recall@20_query_mean": 0.9627904761904763,
+            "recall@50_bootstrap_ci95": [
+              0.9894662500000001,
+              0.99568375
+            ],
+            "recall@50_query_mean": 0.9928333333333333,
+            "recall@100_bootstrap_ci95": [
+              1.0,
+              1.0
+            ],
+            "recall@100_query_mean": 1.0,
+            "mrr_bootstrap_ci95": [
+              0.973601171884479,
+              0.9880411511780568
+            ],
+            "mrr_query_mean": 0.9810995173080049
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_labeled_eval.jsonl",
+            "query_count": 1000,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "fixed_alpha",
+            "gardian_no_positive_queries": 0,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.003733965740787178,
+              "delta_ci95": [
+                0.001177171107558515,
+                0.006381537682291479
+              ],
+              "paired_randomization_pvalue": 0.0047995200479952005,
+              "ablation": "fixed_alpha"
+            }
+          }
+        },
+        "no_sparse_signal": {
+          "gardian": {
+            "ndcg@5": 0.8680176093230365,
+            "ndcg@10": 0.8963021497003638,
+            "ndcg@20": 0.9121292311696988,
+            "ndcg@50": 0.9211870254331105,
+            "ndcg@100": 0.9244069237819738,
+            "recall@5": 0.8503285714285714,
+            "recall@10": 0.9116285714285713,
+            "recall@20": 0.9552809523809523,
+            "recall@50": 0.9871238095238095,
+            "recall@100": 1.0,
+            "hit@5": 0.989,
+            "hit@10": 0.994,
+            "hit@20": 0.996,
+            "hit@50": 0.999,
+            "mrr": 0.977047694457681,
+            "mrr@10": 0.977047694457681,
+            "ndcg@10_query_mean": 0.8963021497003638,
+            "ndcg@10_bootstrap_ci95": [
+              0.8860509271517382,
+              0.9055981975556623
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.856733504274501,
+              0.8792419520868782
+            ],
+            "ndcg@5_query_mean": 0.8680176093230365,
+            "ndcg@20_bootstrap_ci95": [
+              0.9030494626575468,
+              0.9203981685184395
+            ],
+            "ndcg@20_query_mean": 0.9121292311696988,
+            "ndcg@50_bootstrap_ci95": [
+              0.9131658597142841,
+              0.9286409617751958
+            ],
+            "ndcg@50_query_mean": 0.9211870254331105,
+            "ndcg@100_bootstrap_ci95": [
+              0.9169205794193679,
+              0.931588146646431
+            ],
+            "ndcg@100_query_mean": 0.9244069237819738,
+            "recall@5_bootstrap_ci95": [
+              0.8376232142857143,
+              0.8629020833333332
+            ],
+            "recall@5_query_mean": 0.8503285714285714,
+            "recall@20_bootstrap_ci95": [
+              0.9471951190476189,
+              0.9628821428571429
+            ],
+            "recall@20_query_mean": 0.9552809523809523,
+            "recall@50_bootstrap_ci95": [
+              0.9826828571428572,
+              0.9912333333333333
+            ],
+            "recall@50_query_mean": 0.9871238095238095,
+            "recall@100_bootstrap_ci95": [
+              1.0,
+              1.0
+            ],
+            "recall@100_query_mean": 1.0,
+            "mrr_bootstrap_ci95": [
+              0.9687850411054545,
+              0.9845318073227538
+            ],
+            "mrr_query_mean": 0.977047694457681
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_labeled_eval.jsonl",
+            "query_count": 1000,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "no_sparse_signal",
+            "gardian_no_positive_queries": 0,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.012517933222791293,
+              "delta_ci95": [
+                0.0065528527720624345,
+                0.01864684592440327
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "no_sparse_signal"
+            }
+          }
+        },
+        "no_dense_signal": {
+          "gardian": {
+            "ndcg@5": 0.784273775576723,
+            "ndcg@10": 0.8086868212945055,
+            "ndcg@20": 0.8255273126737106,
+            "ndcg@50": 0.8493369652203743,
+            "ndcg@100": 0.8655945545866385,
+            "recall@5": 0.7491619047619047,
+            "recall@10": 0.8020952380952381,
+            "recall@20": 0.8481976190476189,
+            "recall@50": 0.9328166666666666,
+            "recall@100": 1.0,
+            "hit@5": 0.981,
+            "hit@10": 0.985,
+            "hit@20": 0.987,
+            "hit@50": 0.993,
+            "mrr": 0.9622542585977142,
+            "mrr@10": 0.9622542585977142,
+            "ndcg@10_query_mean": 0.8086868212945055,
+            "ndcg@10_bootstrap_ci95": [
+              0.7954403578900889,
+              0.8214529758469665
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.7704519017427905,
+              0.7976708167303649
+            ],
+            "ndcg@5_query_mean": 0.784273775576723,
+            "ndcg@20_bootstrap_ci95": [
+              0.8129034425914113,
+              0.8376748926899381
+            ],
+            "ndcg@20_query_mean": 0.8255273126737106,
+            "ndcg@50_bootstrap_ci95": [
+              0.8388856574625003,
+              0.8599134377028753
+            ],
+            "ndcg@50_query_mean": 0.8493369652203743,
+            "ndcg@100_bootstrap_ci95": [
+              0.8564791151232656,
+              0.8747651572163941
+            ],
+            "ndcg@100_query_mean": 0.8655945545866385,
+            "recall@5_bootstrap_ci95": [
+              0.7329498809523808,
+              0.7649628571428571
+            ],
+            "recall@5_query_mean": 0.7491619047619047,
+            "recall@20_bootstrap_ci95": [
+              0.8337303571428571,
+              0.8619016666666668
+            ],
+            "recall@20_query_mean": 0.8481976190476189,
+            "recall@50_bootstrap_ci95": [
+              0.92274875,
+              0.943
+            ],
+            "recall@50_query_mean": 0.9328166666666666,
+            "recall@100_bootstrap_ci95": [
+              1.0,
+              1.0
+            ],
+            "recall@100_query_mean": 1.0,
+            "mrr_bootstrap_ci95": [
+              0.951700673785064,
+              0.9717671034076807
+            ],
+            "mrr_query_mean": 0.9622542585977142
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_labeled_eval.jsonl",
+            "query_count": 1000,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "no_dense_signal",
+            "gardian_no_positive_queries": 0,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.10013326162864948,
+              "delta_ci95": [
+                0.09072208616004243,
+                0.11010615967305652
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "no_dense_signal"
+            }
+          }
+        },
+        "oracle_branch": {
+          "gardian": {
+            "ndcg@5": 0.9169378572709563,
+            "ndcg@10": 0.9380290534208964,
+            "ndcg@20": 0.9456880156439635,
+            "ndcg@50": 0.9520778528891366,
+            "ndcg@100": 0.9542924969333478,
+            "recall@5": 0.9012785714285715,
+            "recall@10": 0.9481809523809525,
+            "recall@20": 0.9693333333333334,
+            "recall@50": 0.9912666666666666,
+            "recall@100": 1.0,
+            "hit@5": 0.996,
+            "hit@10": 0.998,
+            "hit@20": 0.998,
+            "hit@50": 0.999,
+            "mrr": 0.9913913954426864,
+            "mrr@10": 0.9913913954426864,
+            "ndcg@10_query_mean": 0.9380290534208964,
+            "ndcg@10_bootstrap_ci95": [
+              0.9299762495282614,
+              0.9453429582775508
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.9077279151747417,
+              0.9255359575050841
+            ],
+            "ndcg@5_query_mean": 0.9169378572709563,
+            "ndcg@20_bootstrap_ci95": [
+              0.938624813576788,
+              0.9519677082930353
+            ],
+            "ndcg@20_query_mean": 0.9456880156439635,
+            "ndcg@50_bootstrap_ci95": [
+              0.9458758136192795,
+              0.9575726972123773
+            ],
+            "ndcg@50_query_mean": 0.9520778528891366,
+            "ndcg@100_bootstrap_ci95": [
+              0.9484872502304926,
+              0.9596434982086355
+            ],
+            "ndcg@100_query_mean": 0.9542924969333478,
+            "recall@5_bootstrap_ci95": [
+              0.8900684523809522,
+              0.9117575595238094
+            ],
+            "recall@5_query_mean": 0.9012785714285715,
+            "recall@20_bootstrap_ci95": [
+              0.9624666666666667,
+              0.9755175
+            ],
+            "recall@20_query_mean": 0.9693333333333334,
+            "recall@50_bootstrap_ci95": [
+              0.9875833333333333,
+              0.9946666666666666
+            ],
+            "recall@50_query_mean": 0.9912666666666666,
+            "recall@100_bootstrap_ci95": [
+              1.0,
+              1.0
+            ],
+            "recall@100_query_mean": 1.0,
+            "mrr_bootstrap_ci95": [
+              0.9859925493763725,
+              0.9960232558139535
+            ],
+            "mrr_query_mean": 0.9913913954426864
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_labeled_eval.jsonl",
+            "query_count": 1000,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "oracle_branch",
+            "gardian_no_positive_queries": 0,
+            "oracle_branch": {
+              "oracle_ndcg@10": 0.9380290534208964,
+              "tie_fraction": 0.5915247524752475,
+              "invariant_fraction": 0.3,
+              "n_queries": 1000,
+              "n_queries_with_gold": 1000
+            },
+            "oracle_valid_cutoff": 10,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": -0.029208970497741425,
+              "delta_ci95": [
+                -0.03319210809473998,
+                -0.025121829657397027
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "oracle_branch"
+            }
+          }
+        },
+        "uniform_alpha": {
+          "gardian": {
+            "ndcg@5": 0.8707415987440402,
+            "ndcg@10": 0.8991526246137247,
+            "ndcg@20": 0.9145554143700318,
+            "ndcg@50": 0.9249967743924653,
+            "ndcg@100": 0.9265135256325011,
+            "recall@5": 0.8535285714285713,
+            "recall@10": 0.9162309523809523,
+            "recall@20": 0.9584833333333334,
+            "recall@50": 0.9938333333333332,
+            "recall@100": 1.0,
+            "hit@5": 0.991,
+            "hit@10": 0.994,
+            "hit@20": 0.998,
+            "hit@50": 0.999,
+            "mrr": 0.9804254593766889,
+            "mrr@10": 0.9804254593766889,
+            "ndcg@10_query_mean": 0.8991526246137247,
+            "ndcg@10_bootstrap_ci95": [
+              0.8893760707969509,
+              0.9088811831428367
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.8590221217306212,
+              0.8819506271857976
+            ],
+            "ndcg@5_query_mean": 0.8707415987440402,
+            "ndcg@20_bootstrap_ci95": [
+              0.9059409483351024,
+              0.9227505539912689
+            ],
+            "ndcg@20_query_mean": 0.9145554143700318,
+            "ndcg@50_bootstrap_ci95": [
+              0.9175851416761008,
+              0.932076743690313
+            ],
+            "ndcg@50_query_mean": 0.9249967743924653,
+            "ndcg@100_bootstrap_ci95": [
+              0.9192168133551843,
+              0.9335296925495037
+            ],
+            "ndcg@100_query_mean": 0.9265135256325011,
+            "recall@5_bootstrap_ci95": [
+              0.8396666666666667,
+              0.866507976190476
+            ],
+            "recall@5_query_mean": 0.8535285714285713,
+            "recall@20_bootstrap_ci95": [
+              0.9506991666666668,
+              0.9661
+            ],
+            "recall@20_query_mean": 0.9584833333333334,
+            "recall@50_bootstrap_ci95": [
+              0.9905491666666666,
+              0.9964833333333334
+            ],
+            "recall@50_query_mean": 0.9938333333333332,
+            "recall@100_bootstrap_ci95": [
+              1.0,
+              1.0
+            ],
+            "recall@100_query_mean": 1.0,
+            "mrr_bootstrap_ci95": [
+              0.972852997532977,
+              0.9874731760668748
+            ],
+            "mrr_query_mean": 0.9804254593766889
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_labeled_eval.jsonl",
+            "query_count": 1000,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "uniform_alpha",
+            "gardian_no_positive_queries": 0,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.009667458309430294,
+              "delta_ci95": [
+                0.006546017904875522,
+                0.012822463980064435
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "uniform_alpha"
+            }
+          }
+        }
+      },
+      "pubmedqa_artificial": {
+        "full": {
+          "gardian": {
+            "ndcg@5": 0.7548198058101618,
+            "ndcg@10": 0.7934795497052896,
+            "ndcg@20": 0.8172681076222383,
+            "ndcg@50": 0.835794267811463,
+            "ndcg@100": 0.8398907811333787,
+            "recall@5": 0.7501436308412925,
+            "recall@10": 0.838295458703846,
+            "recall@20": 0.908041497420134,
+            "recall@50": 0.9769943645478829,
+            "recall@100": 0.9952793940059282,
+            "hit@5": 0.9645954550444615,
+            "hit@10": 0.9799099791415083,
+            "hit@20": 0.9884729388516852,
+            "hit@50": 0.9939620155889779,
+            "mrr": 0.9096544145595562,
+            "mrr@10": 0.9096544145595562,
+            "ndcg@10_query_mean": 0.7934795497052896,
+            "ndcg@10_bootstrap_ci95": [
+              0.7900752734563838,
+              0.796749430739893
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.750960957433137,
+              0.7584183627836535
+            ],
+            "ndcg@5_query_mean": 0.7548198058101618,
+            "ndcg@20_bootstrap_ci95": [
+              0.8141665874001348,
+              0.8201459758266578
+            ],
+            "ndcg@20_query_mean": 0.8172681076222383,
+            "ndcg@50_bootstrap_ci95": [
+              0.8329688738636414,
+              0.8384494584427475
+            ],
+            "ndcg@50_query_mean": 0.835794267811463,
+            "ndcg@100_bootstrap_ci95": [
+              0.837178316434807,
+              0.8424918166802381
+            ],
+            "ndcg@100_query_mean": 0.8398907811333787,
+            "recall@5_bootstrap_ci95": [
+              0.7460551377758261,
+              0.7541698686280967
+            ],
+            "recall@5_query_mean": 0.7501436308412925,
+            "recall@20_bootstrap_ci95": [
+              0.9051926437223261,
+              0.9107330661982656
+            ],
+            "recall@20_query_mean": 0.908041497420134,
+            "recall@50_bootstrap_ci95": [
+              0.9753549374245252,
+              0.9785444798184944
+            ],
+            "recall@50_query_mean": 0.9769943645478829,
+            "recall@100_bootstrap_ci95": [
+              0.9942899879240312,
+              0.996212537051268
+            ],
+            "recall@100_query_mean": 0.9952793940059282,
+            "mrr_bootstrap_ci95": [
+              0.9061646401012339,
+              0.9129783874045019
+            ],
+            "mrr_query_mean": 0.9096544145595562
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_artificial_test.jsonl",
+            "query_count": 18218,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": null,
+            "gardian_no_positive_queries": 86,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {}
+        },
+        "fixed_alpha": {
+          "gardian": {
+            "ndcg@5": 0.7530734461075606,
+            "ndcg@10": 0.7913378707666217,
+            "ndcg@20": 0.815226377191414,
+            "ndcg@50": 0.8343083603211884,
+            "ndcg@100": 0.8387390894238606,
+            "recall@5": 0.7476378673107182,
+            "recall@10": 0.8346177772898598,
+            "recall@20": 0.9044900647711055,
+            "recall@50": 0.9754839535990047,
+            "recall@100": 0.9952793940059282,
+            "hit@5": 0.9656383796245471,
+            "hit@10": 0.9795257437698979,
+            "hit@20": 0.9886376111538039,
+            "hit@50": 0.9939620155889779,
+            "mrr": 0.9105159786454051,
+            "mrr@10": 0.9105159786454051,
+            "ndcg@10_query_mean": 0.7913378707666217,
+            "ndcg@10_bootstrap_ci95": [
+              0.7878798833231072,
+              0.7946138522412387
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.7492487163738165,
+              0.7565599864873855
+            ],
+            "ndcg@5_query_mean": 0.7530734461075606,
+            "ndcg@20_bootstrap_ci95": [
+              0.8121532249884493,
+              0.8180898798856441
+            ],
+            "ndcg@20_query_mean": 0.815226377191414,
+            "ndcg@50_bootstrap_ci95": [
+              0.8315419238046008,
+              0.8369460438762915
+            ],
+            "ndcg@50_query_mean": 0.8343083603211884,
+            "ndcg@100_bootstrap_ci95": [
+              0.836035353540409,
+              0.8412688015013507
+            ],
+            "ndcg@100_query_mean": 0.8387390894238606,
+            "recall@5_bootstrap_ci95": [
+              0.743405926373184,
+              0.7515082839316426
+            ],
+            "recall@5_query_mean": 0.7476378673107182,
+            "recall@20_bootstrap_ci95": [
+              0.9015358436710944,
+              0.9072182273941524
+            ],
+            "recall@20_query_mean": 0.9044900647711055,
+            "recall@50_bootstrap_ci95": [
+              0.9738353322721119,
+              0.9770440178212024
+            ],
+            "recall@50_query_mean": 0.9754839535990047,
+            "recall@100_bootstrap_ci95": [
+              0.9942899879240312,
+              0.996212537051268
+            ],
+            "recall@100_query_mean": 0.9952793940059282,
+            "mrr_bootstrap_ci95": [
+              0.9069986109678349,
+              0.913763282105429
+            ],
+            "mrr_query_mean": 0.9105159786454051
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_artificial_test.jsonl",
+            "query_count": 18218,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "fixed_alpha",
+            "gardian_no_positive_queries": 86,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.0021416789386679504,
+              "delta_ci95": [
+                0.0012678546313425064,
+                0.003023195109400476
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "fixed_alpha"
+            }
+          }
+        },
+        "no_sparse_signal": {
+          "gardian": {
+            "ndcg@5": 0.6857142099091481,
+            "ndcg@10": 0.727785410969056,
+            "ndcg@20": 0.7551669829914779,
+            "ndcg@50": 0.7812870401378699,
+            "ndcg@100": 0.7896243071325919,
+            "recall@5": 0.6824486771325062,
+            "recall@10": 0.778934753174516,
+            "recall@20": 0.859662604749881,
+            "recall@50": 0.9585629597101767,
+            "recall@100": 0.9952793940059282,
+            "hit@5": 0.9335272807113844,
+            "hit@10": 0.9617411351410693,
+            "hit@20": 0.9774947853770996,
+            "hit@50": 0.992370183335163,
+            "mrr": 0.8578971836615393,
+            "mrr@10": 0.8578971836615393,
+            "ndcg@10_query_mean": 0.727785410969056,
+            "ndcg@10_bootstrap_ci95": [
+              0.7237890832661197,
+              0.7313959113366817
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.6815524801800168,
+              0.6899361003765263
+            ],
+            "ndcg@5_query_mean": 0.6857142099091481,
+            "ndcg@20_bootstrap_ci95": [
+              0.7513899115024,
+              0.75864077800514
+            ],
+            "ndcg@20_query_mean": 0.7551669829914779,
+            "ndcg@50_bootstrap_ci95": [
+              0.7779639291151723,
+              0.7844527545209881
+            ],
+            "ndcg@50_query_mean": 0.7812870401378699,
+            "ndcg@100_bootstrap_ci95": [
+              0.7864229249359482,
+              0.7925430107614554
+            ],
+            "ndcg@100_query_mean": 0.7896243071325919,
+            "recall@5_bootstrap_ci95": [
+              0.6780289868994034,
+              0.6868108006733267
+            ],
+            "recall@5_query_mean": 0.6824486771325062,
+            "recall@20_bootstrap_ci95": [
+              0.856257959161269,
+              0.8630106213634867
+            ],
+            "recall@20_query_mean": 0.859662604749881,
+            "recall@50_bootstrap_ci95": [
+              0.9565061569144069,
+              0.9606269211768579
+            ],
+            "recall@50_query_mean": 0.9585629597101767,
+            "recall@100_bootstrap_ci95": [
+              0.9942899879240312,
+              0.996212537051268
+            ],
+            "recall@100_query_mean": 0.9952793940059282,
+            "mrr_bootstrap_ci95": [
+              0.8534607481978599,
+              0.8620401671712603
+            ],
+            "mrr_query_mean": 0.8578971836615393
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_artificial_test.jsonl",
+            "query_count": 18218,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "no_sparse_signal",
+            "gardian_no_positive_queries": 86,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.06569413873623368,
+              "delta_ci95": [
+                0.06334451560568537,
+                0.06813468801543211
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "no_sparse_signal"
+            }
+          }
+        },
+        "no_dense_signal": {
+          "gardian": {
+            "ndcg@5": 0.6363518977564139,
+            "ndcg@10": 0.6691625510095822,
+            "ndcg@20": 0.6954352366722957,
+            "ndcg@50": 0.7307437105291931,
+            "ndcg@100": 0.7517888110899724,
+            "recall@5": 0.6142752589014527,
+            "recall@10": 0.6897546382698431,
+            "recall@20": 0.76730888864493,
+            "recall@50": 0.9006495407472462,
+            "recall@100": 0.9952793940059282,
+            "hit@5": 0.9092106707651773,
+            "hit@10": 0.9418706773520694,
+            "hit@20": 0.9645954550444615,
+            "hit@50": 0.9879240311779559,
+            "mrr": 0.8443712478325678,
+            "mrr@10": 0.8443712478325678,
+            "ndcg@10_query_mean": 0.6691625510095822,
+            "ndcg@10_bootstrap_ci95": [
+              0.6650919100949441,
+              0.6730085635840544
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.6320154509714037,
+              0.6403850183964374
+            ],
+            "ndcg@5_query_mean": 0.6363518977564139,
+            "ndcg@20_bootstrap_ci95": [
+              0.6914683162672157,
+              0.699168237342897
+            ],
+            "ndcg@20_query_mean": 0.6954352366722957,
+            "ndcg@50_bootstrap_ci95": [
+              0.7271917223187853,
+              0.7340169712303606
+            ],
+            "ndcg@50_query_mean": 0.7307437105291931,
+            "ndcg@100_bootstrap_ci95": [
+              0.7485441666423263,
+              0.7547914752125271
+            ],
+            "ndcg@100_query_mean": 0.7517888110899724,
+            "recall@5_bootstrap_ci95": [
+              0.6096386815237679,
+              0.6187080771764188
+            ],
+            "recall@5_query_mean": 0.6142752589014527,
+            "recall@20_bootstrap_ci95": [
+              0.7632411168441469,
+              0.7712100898378893
+            ],
+            "recall@20_query_mean": 0.76730888864493,
+            "recall@50_bootstrap_ci95": [
+              0.8975838913894684,
+              0.9036585611300179
+            ],
+            "recall@50_query_mean": 0.9006495407472462,
+            "recall@100_bootstrap_ci95": [
+              0.9942899879240312,
+              0.996212537051268
+            ],
+            "recall@100_query_mean": 0.9952793940059282,
+            "mrr_bootstrap_ci95": [
+              0.83987456294347,
+              0.8488419656095113
+            ],
+            "mrr_query_mean": 0.8443712478325678
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_artificial_test.jsonl",
+            "query_count": 18218,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "no_dense_signal",
+            "gardian_no_positive_queries": 86,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.1243169986957074,
+              "delta_ci95": [
+                0.12120815447433865,
+                0.12727414999917688
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "no_dense_signal"
+            }
+          }
+        },
+        "oracle_branch": {
+          "gardian": {
+            "ndcg@5": 0.8105453561687443,
+            "ndcg@10": 0.845482373744331,
+            "ndcg@20": 0.8569390315367574,
+            "ndcg@50": 0.8725409849694432,
+            "ndcg@100": 0.876944777319097,
+            "recall@5": 0.8036584696454055,
+            "recall@10": 0.8834504336370623,
+            "recall@20": 0.9176062136348666,
+            "recall@50": 0.9757739598199584,
+            "recall@100": 0.9952793940059282,
+            "hit@5": 0.9773850038423537,
+            "hit@10": 0.9883631573169392,
+            "hit@20": 0.9904490064771105,
+            "hit@50": 0.9941815786584697,
+            "mrr": 0.9428480541238136,
+            "mrr@10": 0.9428480541238136,
+            "ndcg@10_query_mean": 0.845482373744331,
+            "ndcg@10_bootstrap_ci95": [
+              0.842463946804156,
+              0.8482621955678511
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.8071769186699277,
+              0.8136587828839905
+            ],
+            "ndcg@5_query_mean": 0.8105453561687443,
+            "ndcg@20_bootstrap_ci95": [
+              0.8540915160141981,
+              0.8596034547883008
+            ],
+            "ndcg@20_query_mean": 0.8569390315367574,
+            "ndcg@50_bootstrap_ci95": [
+              0.8699552416469661,
+              0.8748756173770105
+            ],
+            "ndcg@50_query_mean": 0.8725409849694432,
+            "ndcg@100_bootstrap_ci95": [
+              0.8744744490238674,
+              0.879129814942405
+            ],
+            "ndcg@100_query_mean": 0.876944777319097,
+            "recall@5_bootstrap_ci95": [
+              0.8000804835876607,
+              0.8071715016284261
+            ],
+            "recall@5_query_mean": 0.8036584696454055,
+            "recall@20_bootstrap_ci95": [
+              0.9148502168185311,
+              0.9201801560727485
+            ],
+            "recall@20_query_mean": 0.9176062136348666,
+            "recall@50_bootstrap_ci95": [
+              0.9740603158048817,
+              0.9773549511472168
+            ],
+            "recall@50_query_mean": 0.9757739598199584,
+            "recall@100_bootstrap_ci95": [
+              0.9942899879240312,
+              0.996212537051268
+            ],
+            "recall@100_query_mean": 0.9952793940059282,
+            "mrr_bootstrap_ci95": [
+              0.9399315777750197,
+              0.9455420758339725
+            ],
+            "mrr_query_mean": 0.9428480541238136
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_artificial_test.jsonl",
+            "query_count": 18218,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "oracle_branch",
+            "gardian_no_positive_queries": 86,
+            "oracle_branch": {
+              "oracle_ndcg@10": 0.845482373744331,
+              "tie_fraction": 0.4652733638684848,
+              "invariant_fraction": 0.17968232958305758,
+              "n_queries": 18218,
+              "n_queries_with_gold": 18132
+            },
+            "oracle_valid_cutoff": 10,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": -0.05200282403904153,
+              "delta_ci95": [
+                -0.05326383591553114,
+                -0.05067164288796289
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "oracle_branch"
+            }
+          }
+        },
+        "uniform_alpha": {
+          "gardian": {
+            "ndcg@5": 0.748136509959484,
+            "ndcg@10": 0.7869258131724405,
+            "ndcg@20": 0.8108264690678484,
+            "ndcg@50": 0.8298358999168737,
+            "ndcg@100": 0.8350314727168123,
+            "recall@5": 0.7430938266183628,
+            "recall@10": 0.8313856259377173,
+            "recall@20": 0.9013558019541112,
+            "recall@50": 0.9720148571010356,
+            "recall@100": 0.9952793940059282,
+            "hit@5": 0.9643210012075969,
+            "hit@10": 0.9792512899330332,
+            "hit@20": 0.9882533757821934,
+            "hit@50": 0.9936326709847404,
+            "mrr": 0.9070116068149754,
+            "mrr@10": 0.9070116068149754,
+            "ndcg@10_query_mean": 0.7869258131724405,
+            "ndcg@10_bootstrap_ci95": [
+              0.783436802467115,
+              0.7902730420293114
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.7443524253185035,
+              0.7517919668714437
+            ],
+            "ndcg@5_query_mean": 0.748136509959484,
+            "ndcg@20_bootstrap_ci95": [
+              0.8076356278617844,
+              0.8138143544518421
+            ],
+            "ndcg@20_query_mean": 0.8108264690678484,
+            "ndcg@50_bootstrap_ci95": [
+              0.8269437818912186,
+              0.8324701308632876
+            ],
+            "ndcg@50_query_mean": 0.8298358999168737,
+            "ndcg@100_bootstrap_ci95": [
+              0.8322674878696419,
+              0.8375910675879492
+            ],
+            "ndcg@100_query_mean": 0.8350314727168123,
+            "recall@5_bootstrap_ci95": [
+              0.7389364913821496,
+              0.7471301277125187
+            ],
+            "recall@5_query_mean": 0.7430938266183628,
+            "recall@20_bootstrap_ci95": [
+              0.8983363065832328,
+              0.9041141544992134
+            ],
+            "recall@20_query_mean": 0.9013558019541112,
+            "recall@50_bootstrap_ci95": [
+              0.9702152404215609,
+              0.9736392807479782
+            ],
+            "recall@50_query_mean": 0.9720148571010356,
+            "recall@100_bootstrap_ci95": [
+              0.9942899879240312,
+              0.996212537051268
+            ],
+            "recall@100_query_mean": 0.9952793940059282,
+            "mrr_bootstrap_ci95": [
+              0.9034851521221281,
+              0.9103439670560698
+            ],
+            "mrr_query_mean": 0.9070116068149754
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_artificial_test.jsonl",
+            "query_count": 18218,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "uniform_alpha",
+            "gardian_no_positive_queries": 86,
+            "fixed_alpha": 0.41,
+            "fixed_alpha_fitted_on": "pubmedqa_artificial",
+            "fixed_alpha_fit_ndcg@10": 0.7883479980336736
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.006553736532849177,
+              "delta_ci95": [
+                0.005414824304444585,
+                0.0076860212879458255
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "uniform_alpha"
+            }
+          }
+        }
+      },
+      "medmcqa": {
+        "full": {
+          "gardian": {
+            "ndcg@5": 0.387930048829785,
+            "ndcg@10": 0.4232600743017486,
+            "ndcg@20": 0.4481377804776534,
+            "ndcg@50": 0.4675271300011839,
+            "ndcg@100": 0.47084898121322843,
+            "recall@5": 0.5149195131527287,
+            "recall@10": 0.6240675304279545,
+            "recall@20": 0.7218296034550451,
+            "recall@50": 0.8182175107970161,
+            "recall@100": 0.8380447585394581,
+            "hit@5": 0.5149195131527287,
+            "hit@10": 0.6240675304279545,
+            "hit@20": 0.7218296034550451,
+            "hit@50": 0.8182175107970161,
+            "mrr": 0.37083420529962097,
+            "mrr@10": 0.37083420529962097,
+            "ndcg@10_query_mean": 0.4232600743017486,
+            "ndcg@10_bootstrap_ci95": [
+              0.41219830907706645,
+              0.4339816671513103
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.37646999145193955,
+              0.39906076911697075
+            ],
+            "ndcg@5_query_mean": 0.387930048829785,
+            "ndcg@20_bootstrap_ci95": [
+              0.4374814605996228,
+              0.4582456351507324
+            ],
+            "ndcg@20_query_mean": 0.4481377804776534,
+            "ndcg@50_bootstrap_ci95": [
+              0.4572611528350032,
+              0.477008094729872
+            ],
+            "ndcg@50_query_mean": 0.4675271300011839,
+            "ndcg@100_bootstrap_ci95": [
+              0.4606383731170452,
+              0.4803405231165134
+            ],
+            "ndcg@100_query_mean": 0.47084898121322843,
+            "recall@5_bootstrap_ci95": [
+              0.5005840204161759,
+              0.5286660777385159
+            ],
+            "recall@5_query_mean": 0.5149195131527287,
+            "recall@20_bootstrap_ci95": [
+              0.7096535139379663,
+              0.7341970946211229
+            ],
+            "recall@20_query_mean": 0.7218296034550451,
+            "recall@50_bootstrap_ci95": [
+              0.8074204946996466,
+              0.8286219081272085
+            ],
+            "recall@50_query_mean": 0.8182175107970161,
+            "recall@100_bootstrap_ci95": [
+              0.8276403612092658,
+              0.8480565371024735
+            ],
+            "recall@100_query_mean": 0.8380447585394581,
+            "mrr_bootstrap_ci95": [
+              0.35972544661298317,
+              0.3813761964131729
+            ],
+            "mrr_query_mean": 0.37083420529962097
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_medmcqa_test.jsonl",
+            "query_count": 5094,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": null,
+            "gardian_no_positive_queries": 825,
+            "fixed_alpha": 0.51,
+            "fixed_alpha_fitted_on": "medmcqa",
+            "fixed_alpha_fit_ndcg@10": 0.42196074856838245
+          },
+          "significance": {}
+        },
+        "fixed_alpha": {
+          "gardian": {
+            "ndcg@5": 0.38696526734812237,
+            "ndcg@10": 0.4217076401768627,
+            "ndcg@20": 0.4466156044331501,
+            "ndcg@50": 0.46644488491056857,
+            "ndcg@100": 0.47033503107022406,
+            "recall@5": 0.5113859442481351,
+            "recall@10": 0.6185708676874755,
+            "recall@20": 0.7165292500981547,
+            "recall@50": 0.814880251276011,
+            "recall@100": 0.8380447585394581,
+            "hit@5": 0.5113859442481351,
+            "hit@10": 0.6185708676874755,
+            "hit@20": 0.7165292500981547,
+            "hit@50": 0.814880251276011,
+            "mrr": 0.3706588076234978,
+            "mrr@10": 0.3706588076234978,
+            "ndcg@10_query_mean": 0.4217076401768627,
+            "ndcg@10_bootstrap_ci95": [
+              0.41056368239769886,
+              0.432283712229897
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.3755385698057656,
+              0.3983180204999978
+            ],
+            "ndcg@5_query_mean": 0.38696526734812237,
+            "ndcg@20_bootstrap_ci95": [
+              0.436196596494194,
+              0.4566192826193435
+            ],
+            "ndcg@20_query_mean": 0.4466156044331501,
+            "ndcg@50_bootstrap_ci95": [
+              0.45641881654890487,
+              0.4760614117673513
+            ],
+            "ndcg@50_query_mean": 0.46644488491056857,
+            "ndcg@100_bootstrap_ci95": [
+              0.4603243858574375,
+              0.4797908006227562
+            ],
+            "ndcg@100_query_mean": 0.47033503107022406,
+            "recall@5_bootstrap_ci95": [
+              0.49744307027875934,
+              0.5255251276010994
+            ],
+            "recall@5_query_mean": 0.5113859442481351,
+            "recall@20_bootstrap_ci95": [
+              0.7041568511974873,
+              0.728116411464468
+            ],
+            "recall@20_query_mean": 0.7165292500981547,
+            "recall@50_bootstrap_ci95": [
+              0.803886925795053,
+              0.8254809579897919
+            ],
+            "recall@50_query_mean": 0.814880251276011,
+            "recall@100_bootstrap_ci95": [
+              0.8276403612092658,
+              0.8480565371024735
+            ],
+            "recall@100_query_mean": 0.8380447585394581,
+            "mrr_bootstrap_ci95": [
+              0.3597530095398631,
+              0.38118496930065554
+            ],
+            "mrr_query_mean": 0.3706588076234978
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_medmcqa_test.jsonl",
+            "query_count": 5094,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "fixed_alpha",
+            "gardian_no_positive_queries": 825,
+            "fixed_alpha": 0.51,
+            "fixed_alpha_fitted_on": "medmcqa",
+            "fixed_alpha_fit_ndcg@10": 0.42196074856838245
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.0015524341248859016,
+              "delta_ci95": [
+                -0.0015710502808643845,
+                0.004915500102310045
+              ],
+              "paired_randomization_pvalue": 0.3575642435756424,
+              "ablation": "fixed_alpha"
+            }
+          }
+        },
+        "no_sparse_signal": {
+          "gardian": {
+            "ndcg@5": 0.29574010278720275,
+            "ndcg@10": 0.3280251194419783,
+            "ndcg@20": 0.35306942030804883,
+            "ndcg@50": 0.3819081185539114,
+            "ndcg@100": 0.39695778104073354,
+            "recall@5": 0.4059678052610915,
+            "recall@10": 0.5053003533568905,
+            "recall@20": 0.6040439733019238,
+            "recall@50": 0.7493129171574401,
+            "recall@100": 0.8380447585394581,
+            "hit@5": 0.4059678052610915,
+            "hit@10": 0.5053003533568905,
+            "hit@20": 0.6040439733019238,
+            "hit@50": 0.7493129171574401,
+            "mrr": 0.2858017656639041,
+            "mrr@10": 0.2858017656639041,
+            "ndcg@10_query_mean": 0.3280251194419783,
+            "ndcg@10_bootstrap_ci95": [
+              0.3173161413677555,
+              0.3381719561782655
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.2844900462427242,
+              0.30601044630077123
+            ],
+            "ndcg@5_query_mean": 0.29574010278720275,
+            "ndcg@20_bootstrap_ci95": [
+              0.3429616622188983,
+              0.36271208076588757
+            ],
+            "ndcg@20_query_mean": 0.35306942030804883,
+            "ndcg@50_bootstrap_ci95": [
+              0.37244367299750597,
+              0.3909208505430057
+            ],
+            "ndcg@50_query_mean": 0.3819081185539114,
+            "ndcg@100_bootstrap_ci95": [
+              0.3879565350314031,
+              0.40561214792585293
+            ],
+            "ndcg@100_query_mean": 0.39695778104073354,
+            "recall@5_bootstrap_ci95": [
+              0.39202493129171573,
+              0.41932175107970154
+            ],
+            "recall@5_query_mean": 0.4059678052610915,
+            "recall@20_bootstrap_ci95": [
+              0.5904986258343149,
+              0.6175893207695328
+            ],
+            "recall@20_query_mean": 0.6040439733019238,
+            "recall@50_bootstrap_ci95": [
+              0.7369454259913624,
+              0.7610914801727523
+            ],
+            "recall@50_query_mean": 0.7493129171574401,
+            "recall@100_bootstrap_ci95": [
+              0.8276403612092658,
+              0.8480565371024735
+            ],
+            "recall@100_query_mean": 0.8380447585394581,
+            "mrr_bootstrap_ci95": [
+              0.2758488246697883,
+              0.29520757350154486
+            ],
+            "mrr_query_mean": 0.2858017656639041
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_medmcqa_test.jsonl",
+            "query_count": 5094,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "no_sparse_signal",
+            "gardian_no_positive_queries": 825,
+            "fixed_alpha": 0.51,
+            "fixed_alpha_fitted_on": "medmcqa",
+            "fixed_alpha_fit_ndcg@10": 0.42196074856838245
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.09523495485977028,
+              "delta_ci95": [
+                0.0879665129188696,
+                0.10265318909967734
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "no_sparse_signal"
+            }
+          }
+        },
+        "no_dense_signal": {
+          "gardian": {
+            "ndcg@5": 0.31461752680776306,
+            "ndcg@10": 0.3470062561857431,
+            "ndcg@20": 0.3714996844014029,
+            "ndcg@50": 0.3980824957680063,
+            "ndcg@100": 0.41382721569473224,
+            "recall@5": 0.4126423243031017,
+            "recall@10": 0.5125638005496663,
+            "recall@20": 0.6095406360424028,
+            "recall@50": 0.7436199450333726,
+            "recall@100": 0.8380447585394581,
+            "hit@5": 0.4126423243031017,
+            "hit@10": 0.5125638005496663,
+            "hit@20": 0.6095406360424028,
+            "hit@50": 0.7436199450333726,
+            "mrr": 0.30804981845466173,
+            "mrr@10": 0.30804981845466173,
+            "ndcg@10_query_mean": 0.3470062561857431,
+            "ndcg@10_bootstrap_ci95": [
+              0.3358943109702619,
+              0.35809705567143074
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.3032979401487681,
+              0.326131724261081
+            ],
+            "ndcg@5_query_mean": 0.31461752680776306,
+            "ndcg@20_bootstrap_ci95": [
+              0.36094373655362993,
+              0.3823199235946933
+            ],
+            "ndcg@20_query_mean": 0.3714996844014029,
+            "ndcg@50_bootstrap_ci95": [
+              0.38787739734431015,
+              0.40807286646550023
+            ],
+            "ndcg@50_query_mean": 0.3980824957680063,
+            "ndcg@100_bootstrap_ci95": [
+              0.403897907838852,
+              0.4234324277829829
+            ],
+            "ndcg@100_query_mean": 0.41382721569473224,
+            "recall@5_bootstrap_ci95": [
+              0.3989006674519042,
+              0.4263888888888888
+            ],
+            "recall@5_query_mean": 0.4126423243031017,
+            "recall@20_bootstrap_ci95": [
+              0.5959952885747939,
+              0.62328720062819
+            ],
+            "recall@20_query_mean": 0.6095406360424028,
+            "recall@50_bootstrap_ci95": [
+              0.7314487632508834,
+              0.7555948174322733
+            ],
+            "recall@50_query_mean": 0.7436199450333726,
+            "recall@100_bootstrap_ci95": [
+              0.8276403612092658,
+              0.8480565371024735
+            ],
+            "recall@100_query_mean": 0.8380447585394581,
+            "mrr_bootstrap_ci95": [
+              0.2974252960331794,
+              0.31864641900203294
+            ],
+            "mrr_query_mean": 0.30804981845466173
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_medmcqa_test.jsonl",
+            "query_count": 5094,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "no_dense_signal",
+            "gardian_no_positive_queries": 825,
+            "fixed_alpha": 0.51,
+            "fixed_alpha_fitted_on": "medmcqa",
+            "fixed_alpha_fit_ndcg@10": 0.42196074856838245
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.07625381811600555,
+              "delta_ci95": [
+                0.06881154210646988,
+                0.08321436639783018
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "no_dense_signal"
+            }
+          }
+        },
+        "oracle_branch": {
+          "gardian": {
+            "ndcg@5": 0.48442088081416074,
+            "ndcg@10": 0.5137597863439167,
+            "ndcg@20": 0.5222808456886131,
+            "ndcg@50": 0.5361309253275592,
+            "ndcg@100": 0.5424403885193412,
+            "recall@5": 0.6062033765213978,
+            "recall@10": 0.6967020023557126,
+            "recall@20": 0.7308598351001178,
+            "recall@50": 0.8005496662740479,
+            "recall@100": 0.8380447585394581,
+            "hit@5": 0.6062033765213978,
+            "hit@10": 0.6967020023557126,
+            "hit@20": 0.7308598351001178,
+            "hit@50": 0.8005496662740479,
+            "mrr": 0.4610874366900057,
+            "mrr@10": 0.4610874366900057,
+            "ndcg@10_query_mean": 0.5137597863439167,
+            "ndcg@10_bootstrap_ci95": [
+              0.5024349850670764,
+              0.5248383370228484
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.4725390170659275,
+              0.49614771898330534
+            ],
+            "ndcg@5_query_mean": 0.48442088081416074,
+            "ndcg@20_bootstrap_ci95": [
+              0.5114237180871727,
+              0.5332845200695221
+            ],
+            "ndcg@20_query_mean": 0.5222808456886131,
+            "ndcg@50_bootstrap_ci95": [
+              0.5256538132774541,
+              0.5467444996852134
+            ],
+            "ndcg@50_query_mean": 0.5361309253275592,
+            "ndcg@100_bootstrap_ci95": [
+              0.5322182864881475,
+              0.5527236092959141
+            ],
+            "ndcg@100_query_mean": 0.5424403885193412,
+            "recall@5_bootstrap_ci95": [
+              0.5920691009030231,
+              0.6191597958382411
+            ],
+            "recall@5_query_mean": 0.6062033765213978,
+            "recall@20_bootstrap_ci95": [
+              0.7179034157832744,
+              0.7432273262661955
+            ],
+            "recall@20_query_mean": 0.7308598351001178,
+            "recall@50_bootstrap_ci95": [
+              0.7891637220259128,
+              0.8115478994895956
+            ],
+            "recall@50_query_mean": 0.8005496662740479,
+            "recall@100_bootstrap_ci95": [
+              0.8276403612092658,
+              0.8480565371024735
+            ],
+            "recall@100_query_mean": 0.8380447585394581,
+            "mrr_bootstrap_ci95": [
+              0.449998831496566,
+              0.4725308253924027
+            ],
+            "mrr_query_mean": 0.4610874366900057
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_medmcqa_test.jsonl",
+            "query_count": 5094,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "oracle_branch",
+            "gardian_no_positive_queries": 825,
+            "oracle_branch": {
+              "oracle_ndcg@10": 0.5137597863439167,
+              "tie_fraction": 0.565891796488152,
+              "invariant_fraction": 0.2890606699461232,
+              "n_queries": 5094,
+              "n_queries_with_gold": 4269
+            },
+            "oracle_valid_cutoff": 10,
+            "fixed_alpha": 0.51,
+            "fixed_alpha_fitted_on": "medmcqa",
+            "fixed_alpha_fit_ndcg@10": 0.42196074856838245
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": -0.09049971204216813,
+              "delta_ci95": [
+                -0.09506053381682651,
+                -0.08586090601839037
+              ],
+              "paired_randomization_pvalue": 9.999000099990002e-05,
+              "ablation": "oracle_branch"
+            }
+          }
+        },
+        "uniform_alpha": {
+          "gardian": {
+            "ndcg@5": 0.3869910403355151,
+            "ndcg@10": 0.42134028113371164,
+            "ndcg@20": 0.44621729539352245,
+            "ndcg@50": 0.46629964705202565,
+            "ndcg@100": 0.4701919040262068,
+            "recall@5": 0.5115822536317236,
+            "recall@10": 0.6175893207695328,
+            "recall@20": 0.7153513937966235,
+            "recall@50": 0.814880251276011,
+            "recall@100": 0.8380447585394581,
+            "hit@5": 0.5115822536317236,
+            "hit@10": 0.6175893207695328,
+            "hit@20": 0.7153513937966235,
+            "hit@50": 0.814880251276011,
+            "mrr": 0.3705424093539562,
+            "mrr@10": 0.3705424093539562,
+            "ndcg@10_query_mean": 0.42134028113371164,
+            "ndcg@10_bootstrap_ci95": [
+              0.4100567742059258,
+              0.4319039315936665
+            ],
+            "ndcg@5_bootstrap_ci95": [
+              0.37544286719059367,
+              0.39843073369599724
+            ],
+            "ndcg@5_query_mean": 0.3869910403355151,
+            "ndcg@20_bootstrap_ci95": [
+              0.4357417109373861,
+              0.4563513406972902
+            ],
+            "ndcg@20_query_mean": 0.44621729539352245,
+            "ndcg@50_bootstrap_ci95": [
+              0.45631779870520006,
+              0.475832097597341
+            ],
+            "ndcg@50_query_mean": 0.46629964705202565,
+            "ndcg@100_bootstrap_ci95": [
+              0.46020313187454326,
+              0.47968943116434626
+            ],
+            "ndcg@100_query_mean": 0.4701919040262068,
+            "recall@5_bootstrap_ci95": [
+              0.49764428739693756,
+              0.5257165292500982
+            ],
+            "recall@5_query_mean": 0.5115822536317236,
+            "recall@20_bootstrap_ci95": [
+              0.7025912838633687,
+              0.7277188849627012
+            ],
+            "recall@20_query_mean": 0.7153513937966235,
+            "recall@50_bootstrap_ci95": [
+              0.8040734197094621,
+              0.8252895563407932
+            ],
+            "recall@50_query_mean": 0.814880251276011,
+            "recall@100_bootstrap_ci95": [
+              0.8276403612092658,
+              0.8480565371024735
+            ],
+            "recall@100_query_mean": 0.8380447585394581,
+            "mrr_bootstrap_ci95": [
+              0.35956202641779794,
+              0.38106696953531144
+            ],
+            "mrr_query_mean": 0.3705424093539562
+          },
+          "_meta": {
+            "rank_data_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_medmcqa_test.jsonl",
+            "query_count": 5094,
+            "qrels": {
+              "source": "pool_labels",
+              "queries_judged": 0,
+              "complete_coverage": false
+            },
+            "scored_on_full_pool": true,
+            "one_forward_mixes": true,
+            "gardian_ablation": "uniform_alpha",
+            "gardian_no_positive_queries": 825,
+            "fixed_alpha": 0.51,
+            "fixed_alpha_fitted_on": "medmcqa",
+            "fixed_alpha_fit_ndcg@10": 0.42196074856838245
+          },
+          "significance": {
+            "full_minus_ablation_ndcg10": {
+              "delta_mean": 0.0019197931680370226,
+              "delta_ci95": [
+                -0.0011529720109757567,
+                0.005252364490154503
+              ],
+              "paired_randomization_pvalue": 0.24627537246275372,
+              "ablation": "uniform_alpha"
+            }
+          }
+        }
+      }
+    }
+  }
+}

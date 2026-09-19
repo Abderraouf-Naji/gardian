@@ -1,0 +1,14 @@
+{
+  "retriever": "hybrid_bm25_medcpt",
+  "seed": 100,
+  "created_utc": "2026-09-06T19:23:53.584780+00:00",
+  "best_ndcg10": 0.7173159448927043,
+  "epochs_completed": 9,
+  "trainable_parameters": 7928836,
+  "train_wall_clock_sec": 5609.331072807312,
+  "train_path": "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_train_all.jsonl",
+  "dev_path": "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_dev_all.jsonl",
+  "query_emb_cache_path": "data/query_emb_cache_hybrid_bm25_medcpt_train_all.pkl",
+  "epoch_logs_jsonl": "results/seeds/seed_100/gardian_training/hybrid_bm25_medcpt/epoch_logs.jsonl",
+  "epoch_logs_csv": "results/seeds/seed_100/gardian_training/hybrid_bm25_medcpt/epoch_logs.csv"
+}

@@ -1,0 +1,13 @@
+# Normalise line endings so text files are LF in the repository and in every
+# checkout. The tree previously mixed CRLF and LF across Python sources, which
+# made whole-file diffs appear whenever an editor rewrote a file.
+* text=auto eol=lf
+
+# Binary artifacts must never be normalised.
+*.pt      binary
+*.png     binary
+*.pdf     binary
+*.npy     binary
+*.index   binary
+*.faiss   binary
+*.pkl     binary

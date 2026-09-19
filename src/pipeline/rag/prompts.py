@@ -1,10 +1,37 @@
-"""RAG reader prompts — strict, task-specific contracts."""
+"""
+RAG reader prompts -- strict, task-specific contracts.
+
+Two yes/no variants are available, selected by ``qa.yesno_prompt`` in
+``configs/base.yaml`` and measurable head-to-head with
+``scripts/ablate_reader_prompt.py`` (which freezes the retrieved passages so the
+prompt is the only variable):
+
+``v1_permissive`` (default)
+    The prompt used for the CoopIS submission, and still the default because it
+    is the only variant with a completed 300-question measurement: 0.5333
+    against the "decisive" rewrite's 0.5300. Its "maybe" clause -- "the
+    evidence is insufficient, mixed, or the key question is not addressed" --
+    licenses hedging almost anywhere. Measured effect on PubMedQA-labeled:
+    25% of gold-yes/no questions answered "maybe" with Llama-3-8B and 44% with
+    Qwen2.5-14B, against a gold "maybe" rate of 11%. Both readers land at or
+    below the 55.2% majority-class baseline.
+
+``v2_calibrated``
+    Narrows "maybe" to genuine conflict or an explicitly inconclusive study,
+    states the label prior, and names the specific failure ("a null result is
+    'no', not 'maybe'"). Also asks for full citation coverage, because readers
+    emit ~1.75 citations against ~3.4 gold passages, which is what caps
+    citation recall at ~0.48.
+
+Keep both: the ablation is part of the paper, so the submitted prompt must stay
+reproducible.
+"""
 
 from __future__ import annotations
 from typing import Tuple
 from src.pipeline.rag.reader_types import ReaderTask
 
-SYSTEM_YESNO = """You are answering a biomedical research question using ONLY the passages below.
+SYSTEM_YESNO_V1_PERMISSIVE = """You are answering a biomedical research question using ONLY the passages below.
 The passages are labeled [P1] through [P10] in the order they were ranked.
 
 Instructions:
@@ -27,6 +54,57 @@ When to choose each answer:
 
 Do not say "I don't know". Do not cite a passage you did not use.
 Do not fabricate [P#] tags."""
+
+SYSTEM_YESNO_V2_CALIBRATED = """You are answering a biomedical research question using ONLY the passages below.
+The passages are labeled [P1] onward in the order they were ranked.
+
+Step 1 - Evidence. Write 2-4 sentences summarising what the passages show.
+Cite EVERY passage that supports a sentence with [P#] tags; one sentence may carry
+several (e.g. "X was observed [P2][P5][P7]."). Every passage you relied on must
+appear at least once.
+
+Step 2 - Direction. In one short sentence, state which way the evidence leans:
+supporting the claim, contradicting it, or genuinely split.
+
+Step 3 - Verdict. Last line MUST be exactly one of:
+     Answer: yes
+     Answer: no
+     Answer: maybe
+
+How to decide:
+- yes  : the evidence leans toward supporting the claim.
+- no   : the evidence leans against the claim, or shows no significant effect.
+         A null or negative result is "no". It is NOT "maybe".
+- maybe: ONLY when the passages directly conflict with each other, or the study
+         itself reports an inconclusive result. Roughly 1 question in 10.
+
+Incomplete or indirect evidence is not a reason for "maybe". If the passages lean
+one way at all, commit to that direction. Reserve "maybe" for true conflict.
+
+Do not say "I don't know". Do not cite a passage you did not use.
+Do not fabricate [P#] tags."""
+
+YESNO_PROMPTS = {
+    "v1_permissive": SYSTEM_YESNO_V1_PERMISSIVE,
+    "v2_calibrated": SYSTEM_YESNO_V2_CALIBRATED,
+}
+
+DEFAULT_YESNO_PROMPT = "v1_permissive"
+
+
+def yesno_system_prompt(variant: str | None = None) -> str:
+    """Resolve the configured yes/no system prompt by name."""
+    key = (variant or DEFAULT_YESNO_PROMPT).strip()
+    if key not in YESNO_PROMPTS:
+        raise ValueError(
+            f"Unknown qa.yesno_prompt={variant!r}; choose from {sorted(YESNO_PROMPTS)}"
+        )
+    return YESNO_PROMPTS[key]
+
+
+# Backwards-compatible alias for callers that import the symbol directly.
+SYSTEM_YESNO = SYSTEM_YESNO_V1_PERMISSIVE
+
 
 SYSTEM_MCQ = """You are answering a multiple-choice biomedical question using ONLY the passages below.
 The passages are labeled [P1] through [P10] in the order they were ranked.
@@ -62,6 +140,7 @@ def build_prompt(
     question: str,
     context: str,
     routing_note: str = "",
+    yesno_prompt: str | None = None,
 ) -> Tuple[str, str]:
     route = (
         f"\n\nRetrieval note (for your reference only): {routing_note}"
@@ -79,7 +158,7 @@ def build_prompt(
         )
         return system, user
     if task == ReaderTask.YESNO:
-        system = f"{SYSTEM_YESNO}{route}"
+        system = f"{yesno_system_prompt(yesno_prompt)}{route}"
         user = (
             f"Passages:\n{context}\n\n"
             f"Question:\n{question}\n\n"

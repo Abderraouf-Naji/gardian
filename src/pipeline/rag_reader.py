@@ -42,7 +42,17 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:  # imported lazily at runtime inside each loader below
+    from src.retrieval.bm25 import BM25Retriever
+    from src.retrieval.dense import DenseRetriever
+    from src.retrieval.hybrid import (
+        HybridBm25FaissRetriever,
+        HybridBm25MedcptRetriever,
+        HybridRetriever,
+        HybridSpladePPFaissRetriever,
+    )
 
 import torch
 from loguru import logger
@@ -53,7 +63,7 @@ from transformers import (
     AutoTokenizer,
 )
 
-# Default unified indices (see scripts/01_Build_bm25_faiss_indices.py).
+# Default unified indices (see scripts/01_build_bm25_faiss_indices.py).
 DEFAULT_BM25_INDEX_DIR = "data/indices/bm25/unified"
 DEFAULT_BM25_INDEX_PKL = "data/indices/bm25/unified/index.pkl"
 DEFAULT_FAISS_INDEX = "data/indices/faiss/unified/faiss.index"
@@ -237,7 +247,6 @@ def format_reader_context(
                 "gardian_score",
                 "sparse_contribution",
                 "dense_contribution",
-                "kg_contribution",
                 "bm25_score",
                 "dense_score",
                 "biobert_score",
@@ -627,7 +636,6 @@ def _signals_one_liner(passages: List[Dict], top_k: int) -> str:
             "gardian_score",
             "sparse_contribution",
             "dense_contribution",
-            "kg_contribution",
             "bm25_score",
             "dense_score",
             "biobert_score",
@@ -741,13 +749,11 @@ def _is_weak_answer(text: str, *, reader_task: str = "open") -> bool:
         return True
     if _pubmedqa_answer_needs_cite_retry(text, reader_task):
         return True
-    t = text.strip().lower()
     # PubMedQA with inline citations + verdict: not weak.
     if re.search(r"\[P\d+\]", text or "", re.I) and re.search(
         r"(?i)\banswer\s*:\s*(yes|no|maybe)\b", text or ""
     ):
         return False
-    t_raw = text.strip()
     t_raw = text.strip()
     # MedMCQA-style "Answer: B — option text" (last line often short but valid).
     if re.match(r"(?i)^answer\s*:\s*[a-d]\s*[—\-–]\s*\S", t_raw):

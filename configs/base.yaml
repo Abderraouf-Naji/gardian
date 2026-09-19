@@ -1,4 +1,12 @@
+# Legacy single-seed field. Retained so older scripts keep working; all
+# reported results come from the `seeds` list below, not from this value.
 seed: 42
+
+# Multi-seed protocol (reviewers 1/3/5: reported margins are as small as 0.1 pp,
+# so every trained component is run once per seed and aggregated with mean/std).
+# Raw per-seed artifacts: results/seeds/seed_<S>/  (never overwritten)
+# Aggregated mean/std:    results/aggregated/      (the only source for paper tables)
+seeds: [13, 21, 42, 87, 100]
 
 paths:
   corpus_jsonl: "data/corpus.jsonl"
@@ -6,9 +14,6 @@ paths:
   bm25_index_pkl: "data/indices/bm25/unified/index.pkl"
   faiss_index: "data/indices/faiss/unified/faiss.index"
   faiss_meta: "data/indices/faiss/unified/faiss_meta.jsonl"
-  # Legacy KG paths (unused when model.text_only=true)
-  kg_graph: "data/kg/default/umls_kg.pkl"
-  kg_lexical_idx: "data/kg/default/umls_kg_lex.pkl"
   rank_data_train: "data/rank_data_train.jsonl"
   rank_data_dev: "data/rank_data_dev.jsonl"
   results_dir: "results/"
@@ -67,27 +72,151 @@ encoder:
   max_length: 128
 
 model:
-  text_only: true
-  sparse_feat_dim: 3
-  dense_feat_dim: 4
-  # Legacy rank JSONL may still carry kg_feats; model ignores them when text_only=true.
-  kg_feat_dim: 0
+  # Branch input widths. Exact per-dimension layout: src/features/schema.py.
+  # Dimensions 3-7 of each branch are the within-pool normalisations and the
+  # channel-retrieval indicator, added
+  # after measuring that raw scores cost 2.4-5.3 nDCG@10 points (the sparse
+  # branch previously had no normalised feature at all while the dense branch
+  # did). Regenerate rank data after changing these.
+  sparse_feat_dim: 8
+  dense_feat_dim: 8
+  # Features written into rank JSONL but NOT fed to the model. Selection happens
+  # when tensors are built, so changing this list needs a re-train but never a
+  # re-run of scripts/03_generate_rank_data.py -- the data keeps all 8+8 columns
+  # and every feature ablation stays reproducible from the same files.
+  #
+  # Empty = feed the model all 16 stored features, which is the measured default.
+  #
+  # Dropping the two retrieval indicators was tested because they are arguably
+  # redundant with the floor-imputed score. It is a wash, not a win: LambdaMART
+  # moves -0.0010 on MedMCQA and +0.0005 on PubMedQA-artificial, and the neural
+  # model is 0.0008-0.0010 *worse* without them (mean of 2 seeds, lambdarank and
+  # listnet, lr 1e-3). All four numbers are inside seed noise, so the indicators
+  # are kept -- there is no evidence for removing them.
+  #
+  # Cutting further is NOT a wash: the best 8 features by tree gain lose 0.0095
+  # (MedMCQA) / 0.0231 (PubMedQA) and the 4 normalisations alone lose 0.0260 /
+  # 0.0480. Importance ranking is a bad guide here -- the 4 normalisations carry
+  # 77% of tree gain but score *below* the 2 raw scores, which carry 1.7%.
+  # See docs/OBJECTIVE.md.
+  #
+  # Selection happens when tensors are built, so changing this list needs a
+  # re-train but never a re-run of scripts/03_generate_rank_data.py.
+  dropped_features: []
+  # What the controller conditions on. Any non-empty subset of
+  #   query_emb   -- the 768-d query embedding: query semantics only
+  #   pool_feats  -- scale-free evidence about how the two channels behaved on
+  #                  THIS query's pool (agreement, peakedness, coverage);
+  #                  see src/features/pool_features.py
+  #
+  # query_emb alone was the CoopIS setting, and it is why per-query adaptivity
+  # does not transfer: alpha becomes a function of query semantics fitted on
+  # PubMedQA/MedMCQA embeddings, so on TREC-COVID it lands 0.02-0.20 below the
+  # fitted optimum and the controller LOSES to a single dev-fitted alpha on
+  # three of four back-ends. Optimal alpha depends on channel agreement and
+  # peakedness for that query, none of which a query embedding can express.
+  #
+  # Ablation axis: [query_emb] / [pool_feats] / [query_emb, pool_feats].
+  # Requires a re-train, never a re-run of scripts/03_generate_rank_data.py --
+  # pool features are computed from the stored pool at load time.
+  # REVERTED 2026-09-07 to the pre-fix setting. [query_emb, pool_feats] was
+  # measured on seed 42 across all four back-ends and did NOT restore
+  # adaptivity: alpha varies (sd 0.20-0.28) but is uncorrelated with the
+  # per-query oracle alpha (corr -0.10 / -0.19 / +0.07), and BM25+MedCPT
+  # collapsed to alpha=0 in-domain as well as zero-shot. Ladder row 6 - row 5
+  # stayed negative on 3 of 4 back-ends. The binding constraint is the training
+  # signal, not the controller's inputs, so the pool-feature path is kept
+  # available and off while the training data is rebuilt on densely-judged
+  # collections (NFCorpus, SciFact).
+  controller_inputs: [query_emb]
+  # Standardise each branch's scores within the candidate pool before mixing.
+  #
+  # Without this, score = alpha*s_sparse + (1-alpha)*s_dense mixes two unbounded
+  # quantities, so the effective weighting depends on each branch's learned
+  # output scale -- and those scales drift out-of-domain. Measured
+  # sd(s_sparse)/sd(s_dense), in-domain -> TREC-COVID: BM25+FAISS 0.65 -> 1.31,
+  # SPLADE+++FAISS 0.39 -> 0.74. Those two back-ends are exactly the ones where
+  # per-query alpha subtracts the most. Normalising makes alpha a genuine
+  # mixing weight that means the same thing on a new collection.
+  #
+  # Listwise training only: it needs the pool to normalise over.
+  # REVERTED 2026-09-07 with controller_inputs, for the same measurement: making
+  # alpha a genuine mixing weight is correct in itself (the ranking becomes
+  # invariant to branch-output rescaling) but did not move adaptivity, and it
+  # constrains training to the listwise path. Turn back on together with
+  # pool_feats when revisiting the controller.
+  normalize_branches: false
+  # Whether the controller predicts per-query fusion weights. With it off the
+  # weight is a constant, which each branch's final Linear layer can absorb --
+  # so no alpha needs tuning and the model is simply f_sp(x) + f_de(x). It also
+  # removes the query encoder from the inference path entirely (46% fewer
+  # parameters, no BERT forward pass per query).
+  #
+  # Measured contribution of the controller, versus the same learned branches
+  # with one fixed weight fitted on held-out data:
+  #   PubMedQA-artificial  +0.0025    MedMCQA  +0.0052    TREC-COVID  -0.0280
+  # It is worth ~4.5% of its own headroom on the synthetic single-gold splits
+  # and is actively harmful on the one collection with real NIST judgments.
+  # See docs/OBJECTIVE.md.
+  use_controller: true
+  # Branch and controller hidden width. 2048 gives ~7.9M trainable parameters
+  # over 7-dimensional branch inputs, which is generous. This is a deliberate
+  # capacity choice, not an inherited default: smaller widths were NOT swept, so
+  # if asked, the honest answer is that 2048 was fixed a priori and the model is
+  # not claimed to be minimal. Both are widened/narrowed together and can be
+  # overridden per run with --branch-hidden / --controller-hidden.
   branch_hidden: 2048
   controller_hidden: 2048
+  # Query-embedding width. NeuML/pubmedbert-base-embeddings is a
+  # sentence-transformers model with MEAN pooling (1_Pooling/config.json:
+  # pooling_mode_mean_tokens=true, pooling_mode_cls_token=false) -- h_q is a
+  # mean-pooled sentence embedding, not the [CLS] token.
   query_feat_dim: 768
-  question_types: ["diagnosis", "treatment", "mechanism", "contraindication", "factoid", "yesno", "other"]
   dropout: 0.12
 
 training:
   epochs: 10
-  batch_size: 256
-  lr: 3.0e-5
+  # Pairs per step in pairwise mode; QUERIES per step in listwise mode
+  # (each query carries listwise_group_size candidates, so 64 queries x 64
+  # candidates = 4096 scored rows per step).
+  batch_size: 64
+  # Swept over {3e-5, 1e-4, 3e-4, 1e-3, 3e-3} x {lambdarank, listnet} x 2 seeds.
+  # 3e-5 is a transformer fine-tuning rate and these are from-scratch MLPs over
+  # tabular features: it underfits badly. 1e-3 is the measured optimum; 3e-3
+  # diverged in 3 of 4 configurations. See docs/OBJECTIVE.md.
+  lr: 1.0e-3
   weight_decay: 1.5e-4
   margin: 1.0
   # Linear warmup epochs then cosine decay to lr * min_lr_ratio (see trainer.py).
   warmup_epochs: 3
   min_lr_ratio: 0.08
-  loss: "pairwise_bce"
+  # Training objective. See src/training/losses.py.
+  #   lambdarank                -- pairwise logistic weighted by |delta nDCG@k|
+  #   approxndcg                -- differentiable 1 - nDCG@k surrogate
+  #   listnet                   -- softmax cross-entropy over the pool
+  #   pairwise_softplus_margin  -- softplus(gamma - (r_pos - r_neg)); the CoopIS
+  #                                submission, retained for the loss ablation
+  #
+  # The margin loss saturates: measured over 34,152 real training pairs from
+  # the epoch-1 checkpoint, the median gate sigmoid(gamma - (r_pos - r_neg)) is
+  # 0.0092, so the median pair contributes under 1% of the gradient available
+  # at the margin boundary -- the model stops improving the ordering while
+  # nDCG@10 is still far from its ceiling. On identical features and the same
+  # combined training file, a listwise objective is worth +4.9 nDCG@10 on
+  # PubMedQA-artificial and +1.4 on MedMCQA. See docs/OBJECTIVE.md.
+  loss: "lambdarank"
+  # Listwise only: candidates per pool. All positives are kept and the pool is
+  # filled with negatives drawn by the same hard-negative sampler used in
+  # pairwise mode, so the two objectives see the same candidate distribution.
+  listwise_group_size: 64
+  # Cutoff the listwise objective optimises. Matches evaluation.cutoffs / the
+  # reported nDCG@10 so the training signal and the metric agree.
+  listwise_ndcg_k: 10
+  # lambdarank: steepness of the pairwise logistic.
+  lambdarank_sigma: 1.0
+  # approxndcg: rank-sigmoid temperature; smaller is a tighter approximation
+  # of the true rank but a harsher loss surface.
+  approxndcg_temperature: 1.0
   early_stopping_patience: 6
   eval_metric: "ndcg@10"
   num_negatives: 48
@@ -100,14 +229,31 @@ training:
   eval_batch_size: 8192
   # Overridden per retriever in scripts/04_train_gardian.py (e.g. query_emb_cache_hybrid_bm25_faiss_train_all.pkl)
   query_emb_cache_path: null
-  # LRU cap for in-memory qid→query_emb entries during training (ignored if preloaded cache is larger).
+  # Cap on qid→query_emb entries *computed at runtime*. A preloaded cache is a
+  # shared float32 matrix and is never evicted.
   query_emb_cache_max_entries: 500000
-  num_workers: 0
+  # Safe to raise now that the query-embedding cache is one contiguous float32
+  # matrix (~0.55 GB for 186k queries, shared across forks instead of copied
+  # per worker) and `shuffle_buffer` below is a loader-wide budget split across
+  # workers. Previously each worker duplicated a ~3.4 GB dict of Python floats
+  # plus a full shuffle buffer, so num_workers=4 needed 28.8 GB and was
+  # OOM-killed. Override per run with `--num-workers`.
+  num_workers: 2
+  # Reservoir shuffle over emitted pairs, in float32 rows (~125 MB at 20000),
+  # divided by num_workers.
+  # The combined file is 78% PubMedQA-artificial followed by 22% MedMCQA;
+  # without this every epoch is one block of each. 0 disables.
+  shuffle_buffer: 20000
   cudnn_deterministic: true
 
 evaluation:
   cutoffs: [5, 10, 20]
   question_type_breakdown: true
+  # Question type is an ANALYSIS dimension only. It is derived from the question
+  # text at report time, is never stored in rank data and is never a model input
+  # (removed -- see docs/QUESTION_TYPE.md). These categories drive the per-type
+  # breakdown table and the alpha-by-type plot.
+  question_types: ["diagnosis", "treatment", "mechanism", "contraindication", "factoid", "yesno", "other"]
 
 qa:
   # GARDIAN live QA (adaptive reranker, not fixed hybrid):
@@ -139,8 +285,20 @@ qa:
   reader_repetition_penalty: 1.12
   reader_no_repeat_ngram_size: 4
   reader_include_signal_features: false
-  reader_max_citations_yesno: 3
+  # Gold passages per PubMedQA question: mean 3.4, max 9. A cap of 3 structurally
+  # limited citation_recall on the 21% of questions with 4+ gold passages; 6
+  # covers 99% of them. See docs/RAG_DIAGNOSIS.md.
+  reader_max_citations_yesno: 6
   reader_max_citations_mcq: 4
+  # Yes/no system prompt variant. v1_permissive is the CoopIS submission and the
+  # measured default: over 300 PubMedQA-labeled questions with the passages held
+  # fixed it scored 0.5333, while the anti-hedging "decisive" rewrite scored
+  # 0.5300 -- suppressing hedging (79 -> 26 "maybe") did NOT convert into
+  # accuracy, because forced answers split roughly evenly between right and
+  # wrong. v2_calibrated exists and is runnable but is NOT yet backed by a
+  # completed 300-question run, so it is not the default.
+  # Compare arms with scripts/ablate_reader_prompt.py.
+  yesno_prompt: v1_permissive
   # Hybrid reader: if true, half slots from sparse + half from dense (can beat RRF top-k).
   # RQ4 / retrieval-aligned eval: keep false so Hybrid = top-k by RRF, GARDIAN = top-k by rerank.
   hybrid_balanced_top_k: false

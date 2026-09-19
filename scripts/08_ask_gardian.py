@@ -7,9 +7,8 @@ import json
 import os
 import pathlib
 import sys
-from typing import Dict, List
+from typing import Dict
 
-import numpy as np
 import torch
 from loguru import logger
 from omegaconf import OmegaConf
@@ -37,7 +36,7 @@ from sentence_transformers import SentenceTransformer
 
 sys.path.insert(0, ".")
 
-from src.common.question_types import assert_cfg_question_types, normalize_question_type, qtype_onehot
+from src.common.question_types import assert_cfg_question_types, normalize_question_type
 from src.common.rank_data_paths import normalize_retriever_name
 from src.evaluation.qa_eval import _enrich_live_candidates_for_gardian
 from src.model.gardian import GARDIAN, build_gardian_from_model_cfg, load_checkpoint_state
@@ -56,30 +55,6 @@ from src.pipeline.rag_reader import (
     retrieve_hybrid_candidates,
     run_reader_rag_block,
 )
-
-
-def _require_kg_artifacts(cfg) -> None:
-    """Fail fast with fix instructions if paths.kg_* were never built."""
-    kg_p = pathlib.Path(cfg.paths.kg_graph)
-    lex_p = pathlib.Path(cfg.paths.kg_lexical_idx)
-    if kg_p.is_file() and lex_p.is_file():
-        return
-    raise FileNotFoundError(
-        "KG artifacts are missing (config points to the new layout under data/kg/default/).\n"
-        f"  graph (missing or not a file): {kg_p}\n"
-        f"  lexical (missing or not a file): {lex_p}\n\n"
-        "If you already built per-source KGs under data/kg/sources/, copy the largest into default:\n"
-        "  python3 scripts/02_build_kg.py --bootstrap-default-from-extra\n"
-        "List candidates first:\n"
-        "  python3 scripts/02_build_kg.py --skim-extra-kg\n\n"
-        "Otherwise create the default KG:\n"
-        "  python3 scripts/02_build_kg.py\n"
-        "Set UMLS_DIR, UMLS_MRCONSO, or UMLS_MRCONSO_ZIP for a real UMLS KG; "
-        "if none are set, the script bootstraps from sources/variants when possible, else synthetic.\n\n"
-        "If you still have legacy pickles directly under data/, run once:\n"
-        "  python3 scripts/02_build_kg.py --organize-only\n"
-        "then run the command above again so data/kg/default/umls_kg.pkl exists.\n"
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -197,8 +172,8 @@ def _print_human_summary(payload: Dict) -> None:
     print("\n" + "=" * 72)
     print(f"Question ({payload.get('question_type', 'other')}): {payload.get('question', '')}")
     print(
-        f"α_sparse = {payload.get('sparse_alfa', 0):.4f}   "
-        f"α_dense = {payload.get('dense_alfa', 0):.4f}   "
+        f"α_sparse = {payload.get('alpha_sparse', 0):.4f}   "
+        f"α_dense = {payload.get('alpha_dense', 0):.4f}   "
         f"retrieval = {payload.get('retrieval_mode', 'fixed_pool')}"
     )
     if payload.get("reader_skipped"):
@@ -282,13 +257,11 @@ class GardianAskRuntime:
                 show_progress_bar=False,
                 convert_to_numpy=True,
             )[0].tolist()
-            qtype_oh = qtype_onehot(normalize_question_type(qtype))
             candidates, ctrl_sparse, ctrl_dense = retrieve_adaptive_candidates_live(
                 question,
                 self.retriever,
                 self.gardian,
                 query_emb=q_emb,
-                qtype_onehot=qtype_oh,
                 cfg=self.cfg,
                 device=self.device,
             )
@@ -306,8 +279,8 @@ class GardianAskRuntime:
                 "question_type": qtype,
                 "retrieval_mode": retrieval_mode,
                 "answer": "I don't know",
-                "sparse_alfa": 0.0,
-                "dense_alfa": 0.0,
+                "alpha_sparse": 0.0,
+                "alpha_dense": 0.0,
                 "top_passages": [],
             }
 
@@ -322,13 +295,13 @@ class GardianAskRuntime:
         )
         ranked = self.gardian.rerank(
             candidates=candidates,
-            query_features={"query_emb": q_emb, "qtype_onehot": qtype_oh},
+            query_features={"query_emb": q_emb},
             device=self.device,
         )
         top_for_reader = ranked[: self.top_passages]
         first = ranked[0]
-        sparse_alfa = float(first["sparse_alfa"])
-        dense_alfa = float(first["dense_alfa"])
+        alpha_sparse = float(first["alpha_sparse"])
+        alpha_dense = float(first["alpha_dense"])
 
         args = self.args
         if getattr(args, "no_reader_react", False):
@@ -366,8 +339,8 @@ class GardianAskRuntime:
                 max_input_length=int(args.max_input_length),
                 question_type=qtype,
                 reader_task="yesno" if qtype == "yesno" else "open",
-                alpha_sparse=sparse_alfa,
-                alpha_dense=dense_alfa,
+                alpha_sparse=alpha_sparse,
+                alpha_dense=alpha_dense,
                 include_signal_features=True,
                 use_react=use_react,
                 react_max_steps=react_max_steps,
@@ -384,10 +357,10 @@ class GardianAskRuntime:
             "reader_skipped": bool(args.no_reader),
             "answer": answer,
             "fusion_formula": "score = alpha_sparse*sparse + alpha_dense*dense",
-            "sparse_alfa": sparse_alfa,
-            "dense_alfa": dense_alfa,
-            "αsparse": sparse_alfa,
-            "αdense": dense_alfa,
+            "alpha_sparse": alpha_sparse,
+            "alpha_dense": alpha_dense,
+            "αsparse": alpha_sparse,
+            "αdense": alpha_dense,
             "rag_how_used": (
                 "Retrieve → GARDIAN rerank (fused sparse+dense branch scores) → "
                 "top-k passages → reader LLM."
@@ -428,7 +401,7 @@ def main() -> None:
         logger.warning("Ignoring --question in --interactive mode")
 
     cfg = OmegaConf.load(args.cfg)
-    assert_cfg_question_types(cfg.model.question_types)
+    assert_cfg_question_types(cfg.evaluation.question_types)
     runtime = GardianAskRuntime(args, cfg)
 
     if args.interactive:

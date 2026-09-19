@@ -318,7 +318,7 @@ def download_medmcqa_sampled(target_passages: int) -> Tuple[Dict[str, str], List
         stats["passed"] += 1
 
     corpus.update(passages)
-    logger.info(f"\n  MedMCQA STRICT STATISTICS:")
+    logger.info("\n  MedMCQA STRICT STATISTICS:")
     logger.info(f"    Processed:        {stats['processed']:,}")
     logger.info(f"    PASSED:           {stats['passed']:,}")
     logger.info(f"    Acceptance rate:  {stats['passed']/max(1,stats['processed'])*100:.1f}%")
@@ -514,7 +514,7 @@ def download_medrag_pubmed(target_passages: int,
                 break
             # Loop continues → re-opens stream → skips seen IDs → resumes
 
-    logger.info(f"\n  MedRAG/pubmed Statistics:")
+    logger.info("\n  MedRAG/pubmed Statistics:")
     for k, v in stats.items():
         logger.info(f"    {k}: {v:,}")
 

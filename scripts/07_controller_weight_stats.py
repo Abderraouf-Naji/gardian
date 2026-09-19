@@ -28,7 +28,6 @@ from tqdm import tqdm
 sys.path.insert(0, ".")
 
 from src.common.question_types import (
-    ORDERED_QUESTION_TYPES,
     assert_cfg_question_types,
     normalize_question_type,
 )
@@ -59,7 +58,7 @@ def parse_args() -> argparse.Namespace:
         "--rank-data",
         type=str,
         default=None,
-        help="Rank JSONL (needs question_type or qtype_onehot).",
+        help="Rank JSONL (needs a question_type label for the per-type grouping).",
     )
     p.add_argument(
         "--retriever",
@@ -83,7 +82,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = OmegaConf.load(args.cfg)
-    assert_cfg_question_types(cfg.model.question_types)
+    assert_cfg_question_types(cfg.evaluation.question_types)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     rank_data_path = args.rank_data or resolve_rank_data_file(args.retriever, "medmcqa", "test")
@@ -95,56 +94,28 @@ def main() -> None:
     for rec in records:
         qid = rec["qid"]
         if qid not in by_qid:
-            qt = rec.get("question_type")
-            if isinstance(qt, str) and qt.strip():
-                qtype = normalize_question_type(qt)
-            else:
-                oh = rec.get("qtype_onehot") or []
-                if oh:
-                    ix = int(np.argmax(np.asarray(oh, dtype=np.float64)))
-                    qtype = (
-                        ORDERED_QUESTION_TYPES[ix]
-                        if 0 <= ix < len(ORDERED_QUESTION_TYPES)
-                        else "other"
-                    )
-                else:
-                    qtype = "other"
+            qtype = normalize_question_type(rec.get("question_type"))
             by_qid[qid] = {
                 "question_type": qtype,
-                "sparse_feats": [],
-                "dense_feats": [],
-                "kg_feats": [],
                 "query_emb": None,
-                "qtype_onehot": None,
-                "kg_coverage": None,
             }
         g = by_qid[qid]
-        g["sparse_feats"].append(torch.tensor(rec["sparse_feats"], dtype=torch.float32))
-        g["dense_feats"].append(torch.tensor(rec["dense_feats"], dtype=torch.float32))
-        g["kg_feats"].append(torch.tensor(rec["kg_feats"], dtype=torch.float32))
         if g["query_emb"] is None:
             g["query_emb"] = torch.tensor(rec["query_emb"], dtype=torch.float32)
-            g["qtype_onehot"] = torch.tensor(rec["qtype_onehot"], dtype=torch.float32)
-            g["kg_coverage"] = rec["kg_coverage"]
 
     model = build_model(cfg, device, args.retriever)
-    branch_names = ["alpha_sparse", "alpha_dense", "alpha_kg"]
+    branch_names = ["alpha_sparse", "alpha_dense"]
     per_type: DefaultDict[str, List[List[float]]] = defaultdict(list)
 
+    # The controller depends only on the query, so one forward per query is
+    # enough -- the weights are identical across that query's candidates.
     with torch.no_grad():
         for qid, qdata in tqdm(by_qid.items(), desc="Controller weights"):
-            n = len(qdata["sparse_feats"])
-            if n == 0:
+            if qdata["query_emb"] is None:
                 continue
-            sb = torch.stack(qdata["sparse_feats"]).to(device)
-            db = torch.stack(qdata["dense_feats"]).to(device)
-            kb = torch.stack(qdata["kg_feats"]).to(device)
-            qe = qdata["query_emb"].unsqueeze(0).expand(n, -1).to(device)
-            qt = qdata["qtype_onehot"].unsqueeze(0).expand(n, -1).to(device)
-            kc = torch.full((n,), qdata["kg_coverage"], dtype=torch.float32, device=device)
-            _, weights = model(sb, db, kb, qe, qt, kc, ablation=None)
-            w0 = weights[0].detach().cpu().tolist()
-            per_type[qdata["question_type"]].append(w0)
+            qe = qdata["query_emb"].to(device)
+            weights = model.controller_weights(qe)
+            per_type[qdata["question_type"]].append(weights[0].cpu().tolist())
 
     summary: Dict[str, Any] = {"by_question_type": {}, "branch_names": branch_names}
     for qtype, rows in sorted(per_type.items()):

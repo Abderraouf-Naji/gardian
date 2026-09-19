@@ -11,13 +11,14 @@ import torch
 from loguru import logger
 from tqdm import tqdm
 
-from src.common.question_types import normalize_question_type, qtype_onehot
 from src.features.dense_feat import compute_dense_features_with_score
+from src.features.build import build_branch_features
+from src.features.schema import select_active
+from src.model.gardian import dropped_features_from_cfg
 from src.features.sparse import compute_sparse_features
 from src.pipeline.rank_dense_features import (
     dense_embedding_pair_for_candidates,
 )
-from src.common.query_emb_cache import load_query_emb_cache
 from src.pipeline.gardian_adaptive import (
     adaptive_channel_budgets,
     controller_weights_from_lists,
@@ -29,7 +30,15 @@ from src.evaluation.pubmedqa_rag import (
     is_pubmedqa_dataset,
     resolve_pubmedqa_rag_mode,
 )
-from src.pipeline.rag.metrics import compute_citation_metrics
+# Metric primitives come from the single canonical module so the QA evaluator
+# and the RAG pipeline can never drift apart. The private aliases keep existing
+# call sites and tests pointed at those same implementations.
+from src.pipeline.rag.metrics import (  # noqa: F401  (re-exported aliases)
+    citation_precision as _citation_precision,
+    citation_recall as _citation_recall,
+    compute_citation_metrics,
+    unsupported_citation_rate as _unsupported_claim_rate,
+)
 from src.pipeline.rag.parser import extract_citations
 from src.pipeline.rag.reader_types import normalize_system_name
 from src.pipeline.rag_reader import (
@@ -38,14 +47,6 @@ from src.pipeline.rag_reader import (
     run_reader_llm_only_block,
     run_reader_rag_block,
 )
-
-
-def _gardian_text_only(cfg: Any = None, model: Optional[torch.nn.Module] = None) -> bool:
-    if model is not None:
-        return bool(getattr(model, "text_only", True))
-    if cfg is not None:
-        return bool(getattr(getattr(cfg, "model", None), "text_only", True))
-    return True
 
 
 def format_context(passages: List[Dict], top_k: int = 5) -> str:
@@ -383,7 +384,8 @@ def _compute_citation_metrics(
     reader_task: str,
     dataset: str,
     answer_text: str = "",
-) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+) -> Dict[str, Any]:
+    """Grounding metrics for one answer (see src/pipeline/rag/metrics.py)."""
     return compute_citation_metrics(
         cited_idxs,
         passages,
@@ -422,6 +424,16 @@ def _aggregate_system_metrics(
         bootstrap_samples,
         bootstrap_seed,
     )
+    gold_any_ci = _bootstrap_ci_optional(
+        [r.get("gold_evidence_in_context_any") for r in rows],
+        bootstrap_samples,
+        bootstrap_seed,
+    )
+    no_cite_ci = _bootstrap_ci_optional(
+        [r.get("answer_without_citation") for r in rows], bootstrap_samples, bootstrap_seed
+    )
+    n_cite_vals = [r.get("n_citations") for r in rows if r.get("n_citations") is not None]
+
     out: Dict[str, Any] = {
         "n_questions": len(rows),
         "answer_accuracy": list(acc_ci),
@@ -436,46 +448,20 @@ def _aggregate_system_metrics(
         "unsupported_claim_rate_ci": _pack_ci(uns_ci),
         "gold_evidence_in_context_rate": list(gold_ctx_ci) if gold_ctx_ci else None,
         "gold_evidence_in_context_rate_ci": _pack_ci(gold_ctx_ci),
+        # Binary companion to the fractional Ctx above: "was ANY gold passage
+        # in context", which is what bounds whether the reader could answer.
+        "gold_evidence_in_context_any": list(gold_any_ci) if gold_any_ci else None,
+        "gold_evidence_in_context_any_ci": _pack_ci(gold_any_ci),
+        # Abstention: uncited answers are excluded from unsupported_claim_rate
+        # (citing nothing must not score as perfectly grounded), so the rate of
+        # uncited answers is reported next to it.
+        "answer_without_citation_rate": list(no_cite_ci) if no_cite_ci else None,
+        "answer_without_citation_rate_ci": _pack_ci(no_cite_ci),
+        "mean_citations_per_answer": (
+            float(sum(n_cite_vals) / len(n_cite_vals)) if n_cite_vals else None
+        ),
     }
     return out
-
-
-def _citation_recall(cited_idxs: List[str], passages: List[Dict], gold_ids: List[str]) -> float:
-    gold_set = set(gold_ids)
-    if not gold_set:
-        return 0.0
-    cited_gold = set()
-    for idx_str in cited_idxs:
-        try:
-            idx = int(idx_str) - 1
-            if 0 <= idx < len(passages):
-                pid = passages[idx]["id"]
-                if pid in gold_set:
-                    cited_gold.add(pid)
-        except ValueError:
-            continue
-    return len(cited_gold) / len(gold_set)
-
-
-def _unsupported_claim_rate(cited_idxs: List[str], passages: List[Dict], gold_ids: List[str]) -> float:
-    """
-    Fraction of **citation markers** that point to a non-gold passage (or out-of-range).
-
-    When the model emits no ``[P#]`` tags, this is ``0.0`` (no attributed claims to audit),
-    not ``1.0`` — the latter made every no-citation answer look maximally "unsupported".
-    """
-    if not cited_idxs:
-        return 0.0
-    gold_set = set(gold_ids)
-    unsupported = 0
-    for idx_str in cited_idxs:
-        try:
-            idx = int(idx_str) - 1
-            if not (0 <= idx < len(passages)) or passages[idx]["id"] not in gold_set:
-                unsupported += 1
-        except ValueError:
-            unsupported += 1
-    return unsupported / max(1, len(cited_idxs))
 
 
 def _enrich_live_candidates_for_gardian(
@@ -488,8 +474,16 @@ def _enrich_live_candidates_for_gardian(
     faiss_lookup=None,
     medcpt_encoder=None,
 ) -> Tuple[List[float], List[float]]:
-    """Attach sparse/dense branch features; return (qtype_onehot, controller query_emb)."""
-    qtype_oh = qtype_onehot(normalize_question_type(qtype))
+    """
+    Attach sparse/dense branch features; return the controller query embedding.
+
+    Features come from :func:`src.features.build.build_branch_features`, the
+    same construction the offline rank data uses. This path previously built
+    its own 3+4 vectors and appended none of the within-pool normalisations,
+    so a model trained on the 8+8 layout was being fed a different
+    representation at inference (and, once the branches widened to 8 dims,
+    crashed on the short list instead).
+    """
     q_emb = encoder.encode(
         [question],
         normalize_embeddings=True,
@@ -504,27 +498,19 @@ def _enrich_live_candidates_for_gardian(
         faiss_lookup=faiss_lookup,
         medcpt_encoder=medcpt_encoder,
     )
-    dense_scores = [
-        float(c.get("medcpt_score", c.get("dense_score", c.get("score", 0.0))))
-        for c in candidates
-    ]
-    dense_mean = float(np.mean(dense_scores))
-    dense_std = float(np.std(dense_scores) + 1e-8)
-    for i, cand in enumerate(candidates):
-        cand["sparse_feats"] = compute_sparse_features(
-            query=question,
-            passage=cand.get("text", ""),
-            bm25_score=float(cand.get("bm25_score", cand.get("spladepp_score", 0.0))),
-            idf_table=None,
-        ).tolist()
-        cand["dense_feats"] = compute_dense_features_with_score(
-            q_emb=q_dense,
-            p_emb=p_embs[i],
-            dense_score=dense_scores[i],
-            score_mean=dense_mean,
-            score_std=dense_std,
-        ).tolist()
-    return qtype_oh, q_emb.tolist()
+    sparse_feats, dense_feats, pool_stats = build_branch_features(
+        question=question,
+        candidates=candidates,
+        retriever_type=retriever_name,
+        idf_table=None,
+        q_dense=q_dense,
+        p_embs=p_embs,
+    )
+    for cand, sf, df in zip(candidates, sparse_feats, dense_feats):
+        cand["sparse_feats"] = sf
+        cand["dense_feats"] = df
+        cand["pool_stats"] = pool_stats
+    return q_emb.tolist()
 
 
 def _live_passage_sort_key(pair: Tuple[float, Dict[str, Any]]) -> Tuple[float, float, float]:
@@ -804,7 +790,6 @@ def evaluate_qa_live(
                 and not bool(getattr(cfg.qa, "rq4_full_union_pool", False))
             )
             if use_adaptive_pool:
-                qtype_oh = qtype_onehot(normalize_question_type(qtype))
                 q_emb = encoder.encode(
                     [question_text],
                     normalize_embeddings=True,
@@ -816,7 +801,6 @@ def evaluate_qa_live(
                     retriever,
                     gardian_model,
                     query_emb=q_emb,
-                    qtype_onehot=qtype_oh,
                     cfg=cfg,
                     device=device,
                 )
@@ -872,9 +856,9 @@ def evaluate_qa_live(
             continue
 
         gardian_ranked: List[Dict[str, Any]] = []
-        alpha_triplet = None
+        alpha_pair = None
         if "gardian" in systems and gardian_model is not None:
-            qtype_oh, q_emb = _enrich_live_candidates_for_gardian(
+            q_emb = _enrich_live_candidates_for_gardian(
                 question=question_text,
                 candidates=candidates,
                 qtype=qtype,
@@ -887,18 +871,15 @@ def evaluate_qa_live(
                 candidates=candidates,
                 query_features={
                     "query_emb": q_emb,
-                    "qtype_onehot": qtype_oh,
                 },
                 device=device,
             )
             if gardian_ranked:
                 w = gardian_ranked[0]
-                alpha_triplet = [
-                    float(w.get("sparse_alfa", 0.0)),
-                    float(w.get("dense_alfa", 0.0)),
+                alpha_pair = [
+                    float(w.get("alpha_sparse", 0.0)),
+                    float(w.get("alpha_dense", 0.0)),
                 ]
-                if not _gardian_text_only(cfg, gardian_model):
-                    alpha_triplet.append(float(w.get("kg_alfa", 0.0)))
 
         for system in systems:
             if system == "llm_only":
@@ -979,11 +960,11 @@ def evaluate_qa_live(
                 reader_task=r_task,
                 yesno_compact=yesno_compact,
                 cfg=cfg,
-                alpha_sparse=(alpha_triplet[0] if (system == "gardian" and alpha_triplet) else None),
-                alpha_dense=(alpha_triplet[1] if (system == "gardian" and alpha_triplet) else None),
+                alpha_sparse=(alpha_pair[0] if (system == "gardian" and alpha_pair) else None),
+                alpha_dense=(alpha_pair[1] if (system == "gardian" and alpha_pair) else None),
                 alpha_kg=(
-                    alpha_triplet[2]
-                    if (system == "gardian" and alpha_triplet and len(alpha_triplet) > 2)
+                    alpha_pair[2]
+                    if (system == "gardian" and alpha_pair and len(alpha_pair) > 2)
                     else None
                 ),
                 include_signal_features=bool(
@@ -998,7 +979,7 @@ def evaluate_qa_live(
                 ),
             )
             cited_idxs = extract_citations(answer)
-            cit_p, cit_r, uns = _compute_citation_metrics(
+            grounding = _compute_citation_metrics(
                 cited_idxs,
                 top_passages,
                 gold_ids,
@@ -1017,23 +998,23 @@ def evaluate_qa_live(
                     dataset,
                     gold_letter=item.get("answer_letter"),
                 ),
-                "citation_precision": cit_p,
-                "citation_recall": cit_r,
-                "unsupported_claim_rate": uns,
+                "citation_precision": grounding["citation_precision"],
+                "citation_recall": grounding["citation_recall"],
+                "unsupported_claim_rate": grounding["unsupported_citation_rate"],
+                "answer_without_citation": grounding["answer_without_citation"],
+                "n_citations": grounding["n_citations"],
+                # Fractional gold coverage ("Ctx"), plus the binary companion:
+                # 0.87 means "87% of gold passages retrieved on average", NOT
+                # "13% of questions had no evidence" -- see rag/metrics.py.
                 "gold_evidence_in_context_rate": _gold_evidence_in_reader_context(
                     top_passages, gold_ids
                 ),
+                "gold_evidence_in_context_any": grounding["gold_in_context_any"],
             }
-            if system == "gardian" and alpha_triplet is not None:
-                row["sparse_alfa"] = alpha_triplet[0]
-                row["dense_alfa"] = alpha_triplet[1]
-                if len(alpha_triplet) > 2:
-                    row["kg_alfa"] = alpha_triplet[2]
-                    row["fusion_formula"] = (
-                        "score = alpha_sparse*sparse + alpha_dense*dense + alpha_kg*kg"
-                    )
-                else:
-                    row["fusion_formula"] = "score = alpha_sparse*sparse + alpha_dense*dense"
+            if system == "gardian" and alpha_pair is not None:
+                row["alpha_sparse"] = alpha_pair[0]
+                row["alpha_dense"] = alpha_pair[1]
+                row["fusion_formula"] = "score = alpha_sparse*sparse + alpha_dense*dense"
             if retrieval_meta is not None:
                 row["retrieval"] = dict(retrieval_meta)
             per_system_rows[system].append(row)
@@ -1093,6 +1074,12 @@ def evaluate_qa_from_rank_records(
     with ``cfg.encoder.model_name`` when a qid is missing from the pickle (e.g. eval
     questions not present in ``*_train_all.pkl``).
     """
+    # The model consumes the active feature subset (configs/base.yaml
+    # model.dropped_features); rank records always carry the full stored 8+8
+    # schema. This must be the same selection used in training -- scoring on
+    # misaligned columns raises nothing and produces a meaningless ranking.
+    _dropped_features = dropped_features_from_cfg(getattr(cfg, "model", None))
+
     by_qid: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for rec in rank_records:
         by_qid[rec["qid"]].append(rec)
@@ -1135,7 +1122,7 @@ def evaluate_qa_from_rank_records(
         r_task = reader_task_for_item(item)
 
         scored_cache: Dict[str, List[Tuple[float, Dict[str, Any]]]] = {}
-        alpha_triplet = None
+        alpha_pair = None
         if "gardian" in systems and gardian_model is not None and candidates:
             gardian_pool = candidates
             if gardian_adaptive_retrieval:
@@ -1146,11 +1133,9 @@ def evaluate_qa_from_rank_records(
                     device,
                     allow_encode_on_cache_miss=allow_query_emb_encode_on_cache_miss,
                 )
-                qoh_pre = candidates[0]["qtype_onehot"]
                 alpha, beta = controller_weights_from_lists(
                     gardian_model,
                     qvec_pre,
-                    qoh_pre,
                     device,
                 )
                 gardian_pool = subset_rank_records_adaptive(candidates, alpha, beta, cfg)
@@ -1158,8 +1143,15 @@ def evaluate_qa_from_rank_records(
                     gardian_pool = candidates
 
             with torch.no_grad():
-                sparse = torch.tensor([r["sparse_feats"] for r in gardian_pool], dtype=torch.float32, device=device)
-                dense = torch.tensor([r["dense_feats"] for r in gardian_pool], dtype=torch.float32, device=device)
+                # Rank records carry the full stored 8+8 schema; the model
+                # consumes the active subset (configs/base.yaml
+                # model.dropped_features). Same selection as training.
+                _sel = [
+                    select_active(r["sparse_feats"], r["dense_feats"], _dropped_features)
+                    for r in gardian_pool
+                ]
+                sparse = torch.tensor([sf for sf, _ in _sel], dtype=torch.float32, device=device)
+                dense = torch.tensor([df for _, df in _sel], dtype=torch.float32, device=device)
                 qvec = _resolve_query_emb_vector(
                     gardian_pool,
                     q_emb_by_qid,
@@ -1170,24 +1162,12 @@ def evaluate_qa_from_rank_records(
                 query_emb = torch.tensor(qvec, dtype=torch.float32, device=device).unsqueeze(0).expand(
                     len(gardian_pool), -1
                 )
-                qtype = torch.tensor(gardian_pool[0]["qtype_onehot"], dtype=torch.float32, device=device).unsqueeze(0).expand(len(gardian_pool), -1)
                 fwd = {
                     "sparse_feats": sparse,
                     "dense_feats": dense,
                     "query_emb": query_emb,
-                    "qtype_onehot": qtype,
                     "return_breakdown": True,
                 }
-                if not _gardian_text_only(cfg, gardian_model):
-                    fwd["kg_feats"] = torch.tensor(
-                        [r["kg_feats"] for r in gardian_pool], dtype=torch.float32, device=device
-                    )
-                    fwd["kg_coverage"] = torch.full(
-                        (len(gardian_pool),),
-                        float(gardian_pool[0].get("kg_coverage", 0.0)),
-                        dtype=torch.float32,
-                        device=device,
-                    )
                 scores, weights, breakdown = gardian_model(**fwd)
                 sparse_contrib = breakdown["sparse_contrib"].detach().cpu().tolist()
                 dense_contrib = breakdown["dense_contrib"].detach().cpu().tolist()
@@ -1214,7 +1194,7 @@ def evaluate_qa_from_rank_records(
                     )
                 ]
                 if weights.shape[0] > 0:
-                    alpha_triplet = [float(x) for x in weights[0].detach().cpu().tolist()]
+                    alpha_pair = [float(x) for x in weights[0].detach().cpu().tolist()]
 
         for system in systems:
             if system == "llm_only":
@@ -1332,14 +1312,14 @@ def evaluate_qa_from_rank_records(
                     or "other"
                 ),
                 reader_task=r_task,
-                alpha_sparse=(alpha_triplet[0] if (system == "gardian" and alpha_triplet is not None) else None),
-                alpha_dense=(alpha_triplet[1] if (system == "gardian" and alpha_triplet is not None) else None),
+                alpha_sparse=(alpha_pair[0] if (system == "gardian" and alpha_pair is not None) else None),
+                alpha_dense=(alpha_pair[1] if (system == "gardian" and alpha_pair is not None) else None),
                 alpha_kg=(
-                    alpha_triplet[2]
+                    alpha_pair[2]
                     if (
                         system == "gardian"
-                        and alpha_triplet is not None
-                        and len(alpha_triplet) > 2
+                        and alpha_pair is not None
+                        and len(alpha_pair) > 2
                     )
                     else None
                 ),
@@ -1353,7 +1333,7 @@ def evaluate_qa_from_rank_records(
                 ),
             )
             cited_idxs = extract_citations(answer)
-            cit_p, cit_r, uns = _compute_citation_metrics(
+            grounding = _compute_citation_metrics(
                 cited_idxs,
                 top_passages,
                 gold_ids,
@@ -1372,29 +1352,28 @@ def evaluate_qa_from_rank_records(
                     dataset,
                     gold_letter=item.get("answer_letter"),
                 ),
-                "citation_precision": cit_p,
-                "citation_recall": cit_r,
-                "unsupported_claim_rate": uns,
+                "citation_precision": grounding["citation_precision"],
+                "citation_recall": grounding["citation_recall"],
+                "unsupported_claim_rate": grounding["unsupported_citation_rate"],
+                "answer_without_citation": grounding["answer_without_citation"],
+                "n_citations": grounding["n_citations"],
+                # Fractional gold coverage ("Ctx"), plus the binary companion:
+                # 0.87 means "87% of gold passages retrieved on average", NOT
+                # "13% of questions had no evidence" -- see rag/metrics.py.
                 "gold_evidence_in_context_rate": _gold_evidence_in_reader_context(
                     top_passages, gold_ids
                 ),
+                "gold_evidence_in_context_any": grounding["gold_in_context_any"],
             }
-            if system == "gardian" and alpha_triplet is not None:
-                row["sparse_alfa"] = alpha_triplet[0]
-                row["dense_alfa"] = alpha_triplet[1]
-                if len(alpha_triplet) > 2:
-                    row["kg_alfa"] = alpha_triplet[2]
-                    row["fusion_formula"] = (
-                        "score = alpha_sparse*sparse + alpha_dense*dense + alpha_kg*kg"
-                    )
-                else:
-                    row["fusion_formula"] = "score = alpha_sparse*sparse + alpha_dense*dense"
+            if system == "gardian" and alpha_pair is not None:
+                row["alpha_sparse"] = alpha_pair[0]
+                row["alpha_dense"] = alpha_pair[1]
+                row["fusion_formula"] = "score = alpha_sparse*sparse + alpha_dense*dense"
                 row["top_passage_contributions"] = [
                     {
                         "pid": p.get("id"),
                         "sparse_contribution": float(p.get("sparse_contribution", 0.0)),
                         "dense_contribution": float(p.get("dense_contribution", 0.0)),
-                        "kg_contribution": float(p.get("kg_contribution", 0.0)),
                     }
                     for p in top_passages
                 ]
@@ -1413,6 +1392,40 @@ def evaluate_qa_from_rank_records(
         )
     logger.info(f"QA evaluation systems completed: {list(aggregate.keys())}")
     return aggregate, per_system_rows
+
+
+def extract_pubmedqa_label(pred: str) -> Optional[str]:
+    """
+    The verdict a PubMedQA answer explicitly states, or None if it states none.
+
+    Mirrors the precedence of :func:`_pubmedqa_label_in_prediction` -- an
+    explicit ``Answer:``/``Label:`` verdict wins, then a bare verdict on the
+    last line -- but stops there rather than falling back to a whole-word
+    search. The fallback is gold-conditioned by design (it asks "is the gold
+    label present?"), so it cannot name *the* predicted label: an answer
+    mentioning both "yes" and "no" would resolve differently depending on which
+    gold it was asked about. Analyses of what the reader actually answered
+    (hedging rates, confusion matrices) need the unconditioned reading.
+    """
+    pred_raw = (pred or "").strip()
+    if not pred_raw:
+        return None
+    pred_l = pred_raw.lower()
+    ans_spans = list(
+        re.finditer(r"(?i)\b(?:the\s+)?answer\s*:\s*(yes|no|maybe)\b", pred_l)
+    )
+    if ans_spans:
+        return ans_spans[-1].group(1).lower()
+    label_spans = list(re.finditer(r"(?i)\blabel\s*:\s*(yes|no|maybe)\b", pred_l))
+    if label_spans:
+        return label_spans[-1].group(1).lower()
+    lines = [ln.strip() for ln in pred_raw.splitlines() if ln.strip()]
+    if lines:
+        last = lines[-1].strip().lower()
+        m = re.match(r"^(yes|no|maybe)[\s.!?,;:]*$", last)
+        if m:
+            return m.group(1)
+    return None
 
 
 def _pubmedqa_label_in_prediction(pred: str, gold: str) -> bool:
@@ -1458,7 +1471,8 @@ def _check_accuracy(
     gold_letter: Optional[str] = None,
 ) -> float:
     pred_raw = pred.strip()
-    pred_l = pred_raw.lower()
+    # Matching below is done with case-insensitive regexes on ``pred_raw``, so no
+    # lowercased copy of the prediction is needed.
     gold_l = gold.strip().lower()
     # JSONL writers use pubmedqa_labeled / pubmedqa_artificial; keep legacy "pubmedqa".
     if dataset in ("pubmedqa", "pubmedqa_labeled", "pubmedqa_artificial"):
@@ -1476,20 +1490,3 @@ def _check_accuracy(
             return 1.0 if re.search(rf"(?i)\b{re.escape(g)}\b", pred_raw) else 0.0
         return 0.0
     return 0.0
-
-
-def _citation_precision(cited_idxs: List[str],
-                        passages: List[Dict],
-                        gold_ids: List[str]) -> Optional[float]:
-    if not cited_idxs:
-        return None
-    gold_set = set(gold_ids)
-    correct  = 0
-    for idx_str in cited_idxs:
-        try:
-            idx = int(idx_str) - 1    # P1 → index 0
-            if 0 <= idx < len(passages) and passages[idx]["id"] in gold_set:
-                correct += 1
-        except ValueError:
-            pass
-    return correct / len(cited_idxs)

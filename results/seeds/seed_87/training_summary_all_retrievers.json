@@ -1,0 +1,86 @@
+{
+  "hybrid_bm25_faiss": {
+    "seed": 87,
+    "best_ndcg10": 0.7100160020134186,
+    "trainable_parameters": 7928836,
+    "train_wall_clock_sec": 6282.554909944534,
+    "checkpoint": "results/seeds/seed_87/gardian_best_hybrid_bm25_faiss.pt",
+    "train_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_train_all.jsonl",
+    "dev_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_dev_all.jsonl",
+    "train_sources": [
+      "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_artificial_train.jsonl",
+      "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_medmcqa_train.jsonl"
+    ],
+    "dev_sources": [
+      "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_pubmedqa_artificial_dev.jsonl",
+      "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_medmcqa_dev.jsonl"
+    ],
+    "training_log_dir": "results/seeds/seed_87/gardian_training/hybrid_bm25_faiss",
+    "epoch_logs_jsonl": "results/seeds/seed_87/gardian_training/hybrid_bm25_faiss/epoch_logs.jsonl",
+    "epoch_logs_csv": "results/seeds/seed_87/gardian_training/hybrid_bm25_faiss/epoch_logs.csv",
+    "run_summary": "results/seeds/seed_87/gardian_training/hybrid_bm25_faiss/run_summary.json"
+  },
+  "hybrid_bm25_medcpt": {
+    "seed": 87,
+    "best_ndcg10": 0.7186264667540269,
+    "trainable_parameters": 7928836,
+    "train_wall_clock_sec": 6232.505049943924,
+    "checkpoint": "results/seeds/seed_87/gardian_best_hybrid_bm25_medcpt.pt",
+    "train_path": "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_train_all.jsonl",
+    "dev_path": "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_dev_all.jsonl",
+    "train_sources": [
+      "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_pubmedqa_artificial_train.jsonl",
+      "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_medmcqa_train.jsonl"
+    ],
+    "dev_sources": [
+      "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_pubmedqa_artificial_dev.jsonl",
+      "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_medmcqa_dev.jsonl"
+    ],
+    "training_log_dir": "results/seeds/seed_87/gardian_training/hybrid_bm25_medcpt",
+    "epoch_logs_jsonl": "results/seeds/seed_87/gardian_training/hybrid_bm25_medcpt/epoch_logs.jsonl",
+    "epoch_logs_csv": "results/seeds/seed_87/gardian_training/hybrid_bm25_medcpt/epoch_logs.csv",
+    "run_summary": "results/seeds/seed_87/gardian_training/hybrid_bm25_medcpt/run_summary.json"
+  },
+  "hybrid_spladepp_faiss": {
+    "seed": 87,
+    "best_ndcg10": 0.7226798480788195,
+    "trainable_parameters": 7928836,
+    "train_wall_clock_sec": 6200.3155789375305,
+    "checkpoint": "results/seeds/seed_87/gardian_best_hybrid_spladepp_faiss.pt",
+    "train_path": "data/hybrid_spladepp_faiss/rank_data_hybrid_spladepp_faiss_train_all.jsonl",
+    "dev_path": "data/hybrid_spladepp_faiss/rank_data_hybrid_spladepp_faiss_dev_all.jsonl",
+    "train_sources": [
+      "data/hybrid_spladepp_faiss/rank_data_hybrid_spladepp_faiss_pubmedqa_artificial_train.jsonl",
+      "data/hybrid_spladepp_faiss/rank_data_hybrid_spladepp_faiss_medmcqa_train.jsonl"
+    ],
+    "dev_sources": [
+      "data/hybrid_spladepp_faiss/rank_data_hybrid_spladepp_faiss_pubmedqa_artificial_dev.jsonl",
+      "data/hybrid_spladepp_faiss/rank_data_hybrid_spladepp_faiss_medmcqa_dev.jsonl"
+    ],
+    "training_log_dir": "results/seeds/seed_87/gardian_training/hybrid_spladepp_faiss",
+    "epoch_logs_jsonl": "results/seeds/seed_87/gardian_training/hybrid_spladepp_faiss/epoch_logs.jsonl",
+    "epoch_logs_csv": "results/seeds/seed_87/gardian_training/hybrid_spladepp_faiss/epoch_logs.csv",
+    "run_summary": "results/seeds/seed_87/gardian_training/hybrid_spladepp_faiss/run_summary.json"
+  },
+  "hybrid_spladepp_medcpt": {
+    "seed": 87,
+    "best_ndcg10": 0.7322018975606044,
+    "trainable_parameters": 7928836,
+    "train_wall_clock_sec": 6109.387805700302,
+    "checkpoint": "results/seeds/seed_87/gardian_best_hybrid_spladepp_medcpt.pt",
+    "train_path": "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_train_all.jsonl",
+    "dev_path": "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_dev_all.jsonl",
+    "train_sources": [
+      "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_pubmedqa_artificial_train.jsonl",
+      "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_medmcqa_train.jsonl"
+    ],
+    "dev_sources": [
+      "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_pubmedqa_artificial_dev.jsonl",
+      "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_medmcqa_dev.jsonl"
+    ],
+    "training_log_dir": "results/seeds/seed_87/gardian_training/hybrid_spladepp_medcpt",
+    "epoch_logs_jsonl": "results/seeds/seed_87/gardian_training/hybrid_spladepp_medcpt/epoch_logs.jsonl",
+    "epoch_logs_csv": "results/seeds/seed_87/gardian_training/hybrid_spladepp_medcpt/epoch_logs.csv",
+    "run_summary": "results/seeds/seed_87/gardian_training/hybrid_spladepp_medcpt/run_summary.json"
+  }
+}

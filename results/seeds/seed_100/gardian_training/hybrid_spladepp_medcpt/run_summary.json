@@ -1,0 +1,14 @@
+{
+  "retriever": "hybrid_spladepp_medcpt",
+  "seed": 100,
+  "created_utc": "2026-09-06T22:54:53.473354+00:00",
+  "best_ndcg10": 0.7335346322589962,
+  "epochs_completed": 10,
+  "trainable_parameters": 7928836,
+  "train_wall_clock_sec": 6086.73929977417,
+  "train_path": "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_train_all.jsonl",
+  "dev_path": "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_dev_all.jsonl",
+  "query_emb_cache_path": "data/query_emb_cache_hybrid_spladepp_medcpt_train_all.pkl",
+  "epoch_logs_jsonl": "results/seeds/seed_100/gardian_training/hybrid_spladepp_medcpt/epoch_logs.jsonl",
+  "epoch_logs_csv": "results/seeds/seed_100/gardian_training/hybrid_spladepp_medcpt/epoch_logs.csv"
+}

@@ -1,18 +1,26 @@
 """
-Canonical question-type ordering for GARDIAN.
+Question-type labels: an **analysis dimension**, never a model input.
 
-``qtype_onehot`` in rank JSONL **must** use the same axis order as
-``cfg.model.question_types`` and ``ControllerMLP`` input width. This module is
-the single source of truth (matches ``scripts/03_generate_rank_data.py``).
+Question type is used only for reporting -- the per-type nDCG breakdown and the
+alpha-by-type distribution. It is derived from the question text at report time,
+is not stored in rank data, and is not seen by the model.
+
+The one-hot that used to condition the controller was removed: it is constant on
+both PubMedQA splits (100% ``yesno``) and separates PubMedQA from MedMCQA
+perfectly in the combined training set, so it functioned as a dataset indicator
+rather than a query signal. Measurements: ``docs/QUESTION_TYPE.md``; regenerate
+them with ``scripts/analyze_question_types.py``.
+
+Categories are configured under ``evaluation.question_types`` in
+``configs/base.yaml``.
 """
 
 from __future__ import annotations
 
-from typing import List, Sequence
+from typing import Sequence
 
-# Index i corresponds to dimension i of qtype_onehot and row i of the
-# question-type slice concatenated to the query embedding in the controller.
-ORDERED_QUESTION_TYPES: tuple[str, ...] = (
+# Reporting order for per-type tables and plots.
+ORDERED_QUESTION_TYPES = (
     "diagnosis",
     "treatment",
     "mechanism",
@@ -22,12 +30,19 @@ ORDERED_QUESTION_TYPES: tuple[str, ...] = (
     "other",
 )
 
-QTYPE_TO_IDX: dict[str, int] = {name: i for i, name in enumerate(ORDERED_QUESTION_TYPES)}
-N_QTYPES: int = len(ORDERED_QUESTION_TYPES)
+N_QTYPES = len(ORDERED_QUESTION_TYPES)
 
+QTYPE_TO_IDX = {name: i for i, name in enumerate(ORDERED_QUESTION_TYPES)}
 
 def normalize_question_type(qtype: str | None) -> str:
-    """Map free-text or coarse labels onto the closed label set."""
+    """
+    Map a free-text or coarse label onto the closed reporting label set.
+
+    Substring matching is deliberate: the source datasets carry labels such as
+    "Diagnosis question" or "management", which must land on the same category
+    as the bare keyword. Anything unrecognised becomes ``"other"`` rather than
+    raising, so a new dataset never breaks a reporting run.
+    """
     if not qtype:
         return "other"
     q = qtype.strip().lower()
@@ -48,22 +63,18 @@ def normalize_question_type(qtype: str | None) -> str:
     return "other"
 
 
-def qtype_onehot(normalized_qtype: str) -> List[float]:
-    """One-hot vector aligned with ``ORDERED_QUESTION_TYPES``."""
-    key = normalize_question_type(normalized_qtype)
-    v = [0.0] * N_QTYPES
-    v[QTYPE_TO_IDX.get(key, QTYPE_TO_IDX["other"])] = 1.0
-    return v
-
-
 def assert_cfg_question_types(cfg_types: Sequence[str]) -> None:
-    """Fail fast if config order drifts from serialized training data."""
-    got = tuple(str(x).lower() for x in cfg_types)
-    if got != ORDERED_QUESTION_TYPES:
+    """
+    Check that the configured reporting categories match this module's order.
+
+    Per-type tables are indexed positionally, so a mismatch would silently
+    relabel rows.
+    """
+    configured = tuple(str(t) for t in cfg_types)
+    if configured != ORDERED_QUESTION_TYPES:
         raise ValueError(
-            "cfg.model.question_types must exactly match rank-data one-hot layout.\n"
-            f"  expected: {list(ORDERED_QUESTION_TYPES)}\n"
-            f"  got:      {list(got)}\n"
-            "Regenerate rank JSONL after any change, or restore the canonical order "
-            "in configs/base.yaml."
+            "evaluation.question_types must match src.common.question_types."
+            "ORDERED_QUESTION_TYPES exactly (order included).\n"
+            f"  configured: {configured}\n"
+            f"  expected:   {ORDERED_QUESTION_TYPES}"
         )

@@ -44,9 +44,14 @@ class ReaderConfig:
     repetition_penalty: float = 1.12
     no_repeat_ngram_size: int = 4
     include_signal_features: bool = False
-    max_citations_yesno: int = 3
+    # 6 covers 99% of PubMedQA questions (gold passages: mean 3.4, max 9).
+    # A cap of 3 structurally limited citation_recall on the 21% of questions
+    # with 4 or more gold passages.
+    max_citations_yesno: int = 6
     max_citations_mcq: int = 4
     allow_retry: bool = True
+    # Which yes/no system prompt to use; see src/pipeline/rag/prompts.py.
+    yesno_prompt: str = "v1_permissive"
 
     @classmethod
     def from_cfg(cls, cfg: Any) -> "ReaderConfig":
@@ -58,12 +63,13 @@ class ReaderConfig:
             max_new_tokens_yesno=int(q.get("max_new_tokens_yesno", 384)),
             max_new_tokens_mcq=int(q.get("max_new_tokens_mcq", 320)),
             max_new_tokens_open=int(q.get("max_new_tokens", 512)),
+            yesno_prompt=str(q.get("yesno_prompt", "v1_permissive")),
             require_citations_yesno=bool(q.get("require_citations_yesno", True)),
             require_citations_mcq=bool(q.get("require_citations_mcq", True)),
             repetition_penalty=float(q.get("reader_repetition_penalty", 1.12)),
             no_repeat_ngram_size=int(q.get("reader_no_repeat_ngram_size", 4)),
             include_signal_features=bool(q.get("reader_include_signal_features", False)),
-            max_citations_yesno=int(q.get("reader_max_citations_yesno", 3)),
+            max_citations_yesno=int(q.get("reader_max_citations_yesno", 6)),
             max_citations_mcq=int(q.get("reader_max_citations_mcq", 4)),
             allow_retry=bool(q.get("reader_allow_retry", True)),
         )

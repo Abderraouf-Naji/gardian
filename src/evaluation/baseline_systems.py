@@ -9,6 +9,16 @@ from src.common.hybrid_retrievers import SPARSE_DENSE_COMPONENTS
 # Reported systems (same candidate pool for hybrid family eval).
 EVAL_SYSTEMS: Tuple[str, ...] = ("sparse", "dense", "hybrid", "rrf", "gardian")
 
+# Tuned-fusion baselines and the adaptivity ceiling. ``evaluate_all_from_rank_data``
+# emits these alongside the five systems above, but they used to be dropped here,
+# so they reached the console and never the per-seed JSON -- which left
+# ``aggregate_seeds.py`` unable to put a dev-tuned Global-alpha row in the paper
+# table. They are model-free, so every seed reports the same value and their
+# aggregated std is 0 by construction; that is the honest reading, not a bug.
+# Oracle-alpha carries a metric block whose non-nDCG@10 entries are None, since
+# a per-query alpha chosen to maximise one cutoff does not bound the others.
+FUSION_BASELINE_SYSTEMS: Tuple[str, ...] = ("global_alpha", "group_alpha", "oracle_alpha")
+
 
 def _is_metric_block(v: Any) -> bool:
     return isinstance(v, dict) and "ndcg@10" in v
@@ -75,6 +85,11 @@ def normalize_eval_results(
         if block is not None:
             out[name] = block
 
+    for name in FUSION_BASELINE_SYSTEMS:
+        block = _pick_block(raw, [name])
+        if block is not None:
+            out[name] = block
+
     if include_cross_encoder:
         cross_encoder = _pick_block(raw, ["cross_encoder"])
         if cross_encoder is not None:
@@ -83,9 +98,9 @@ def normalize_eval_results(
     meta = raw.get("_meta")
     if isinstance(meta, dict):
         out["_meta"] = dict(meta)
-        out["_meta"]["eval_systems"] = list(EVAL_SYSTEMS)
-        if include_cross_encoder and "cross_encoder" in out:
-            out["_meta"]["eval_systems"] = list(EVAL_SYSTEMS) + ["cross_encoder"]
+        out["_meta"]["eval_systems"] = [
+            s for s in out if s != "_meta"
+        ]
         out["_meta"]["sparse_component"] = sp
         out["_meta"]["dense_component"] = de
 

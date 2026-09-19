@@ -4,13 +4,14 @@ Script 03 – Generate ranking data for GARDIAN offline training.
 Datasets supported:
   - PubMedQA (artificial + labeled)
   - MedMCQA
+  - TREC-COVID (BEIR; eval-only, opt-in via --dataset trec_covid)
 
 What this script does
 ---------------------
 For each query in each split:
 1. Run retrieval (bm25 / faiss / spladepp / medcpt / hybrid families)
 2. Build candidate pool from unified OR per-corpus indices
-3. Compute sparse, dense, and KG features for every candidate
+3. Compute sparse and dense features for every candidate
 4. Label candidate positive ONLY if passage ID is in gold_passage_ids
 5. Skip queries with no gold passages
 6. Save JSONL records for training/dev ranking
@@ -45,7 +46,6 @@ import random
 import sys
 import hashlib
 import platform
-import pickle
 from collections import Counter, OrderedDict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -60,7 +60,18 @@ from tqdm import tqdm
 sys.path.insert(0, ".")
 
 from src.common.query_emb_cache import save_query_emb_cache
+from src.features.build import build_branch_features, sparse_signal_scores
 from src.features.dense_feat import compute_dense_features_with_score
+from src.features.pool_norm import (
+    impute_missing_at_floor,
+    is_scored,
+    minmax_normalise,
+    normalise_scored_only,
+    pool_dispersion,
+    rank_normalise,
+    top_score_gap,
+    zscore_normalise,
+)
 from src.features.sparse import compute_sparse_features
 from src.pipeline.rank_dense_features import (
     FaissPassageEmbeddingLookup,
@@ -80,7 +91,7 @@ from src.retrieval.hybrid import (
 )
 from src.retrieval.spladepp import SpladePPRetriever
 from src.retrieval.medcpt import MedCPTRetriever
-from src.common.question_types import normalize_question_type, qtype_onehot
+from src.common.question_types import normalize_question_type
 from src.common.rank_data_paths import normalize_retriever_name, rank_data_file
 from src.retrieval.faiss_util import faiss_gpu_available
 
@@ -108,20 +119,59 @@ DATASETS = {
         "dev": "data/pubmedqa_artificial_dev.jsonl",
         "test": "data/pubmedqa_artificial_test.jsonl",
         "corpus": "pubmedqa_artificial",
-        "type": "training"
+        "type": "training",
+        "include_in_default_all": True,
     },
     "pubmedqa_labeled": {
         "eval": "data/pubmedqa_labeled_eval.jsonl",
         "corpus": "pubmedqa_labeled",
-        "type": "evaluation"
+        "type": "evaluation",
+        "include_in_default_all": True,
     },
     "medmcqa": {
         "train": "data/medmcqa_train.jsonl",
         "dev": "data/medmcqa_dev.jsonl",
         "test": "data/medmcqa_test.jsonl",
         "corpus": "medmcqa",
-        "type": "training"
-    }
+        "type": "training",
+        "include_in_default_all": True,
+    },
+    # BEIR NFCorpus: 42.7 relevant docs/query on train (median 18, only 7.3%
+    # single-positive). The only training source whose alpha surface resembles
+    # TREC-COVID's -- 43x denser than MedMCQA (1.00/query, 100% single-positive)
+    # and 14x denser than PubMedQA-artificial (3.13/query). This is the split
+    # that can actually teach a per-query fusion weight.
+    "nfcorpus": {
+        "train": "data/nfcorpus_train.jsonl",
+        "dev": "data/nfcorpus_dev.jsonl",
+        "test": "data/nfcorpus_test.jsonl",
+        "corpus": "nfcorpus",
+        "corpus_jsonl": "data/corpus_nfcorpus.jsonl",
+        "type": "training",
+        "include_in_default_all": False,
+    },
+    # BEIR SciFact: 1.1 relevant docs/query, 90.5% of train queries have exactly
+    # one. That is MedMCQA's pathology, not a fix for it, so adding it to
+    # train_all contributes queries whose alpha surface is flat by construction.
+    # Registered for EVALUATION (extra collections for statistical power beyond
+    # 50 TREC-COVID topics), not as a source of controller training signal.
+    "scifact": {
+        "train": "data/scifact_train.jsonl",
+        "test": "data/scifact_test.jsonl",
+        "corpus": "scifact",
+        "corpus_jsonl": "data/corpus_scifact.jsonl",
+        "type": "evaluation",
+        "include_in_default_all": False,
+    },
+    # BEIR TREC-COVID: public NIST qrels. Eval-only — never mixed into train_all.
+    "trec_covid": {
+        "test": "data/trec_covid_test.jsonl",
+        "corpus": "trec_covid",
+        "corpus_jsonl": "data/corpus_trec_covid.jsonl",
+        "type": "evaluation",
+        "include_in_default_all": False,
+        "eval_only": True,
+    },
 }
 
 # Unified corpus
@@ -239,15 +289,32 @@ def merge_query_caches(
     out_path: str,
     *,
     expected_dim: Optional[int] = None,
+    additive: bool = False,
 ) -> int:
-    merged: Dict[str, List[float]] = {}
-    for p in src_paths:
-        from src.common.query_emb_cache import load_query_emb_cache
+    """
+    Merge per-split query-embedding caches into ``out_path``.
 
+    ``additive`` seeds the merge with whatever ``out_path`` already holds, so a
+    run covering only some datasets extends the combined cache instead of
+    replacing it. Embeddings are a pure function of (encoder, query text), so
+    re-merging the same query is a no-op and later sources simply win.
+    """
+    from src.common.query_emb_cache import load_query_emb_cache
+
+    merged: Dict[str, List[float]] = {}
+    if additive and pathlib.Path(out_path).is_file():
+        merged.update(load_query_emb_cache(out_path, expected_dim=expected_dim))
+        logger.info(f"  merging into existing {out_path} ({len(merged):,} queries)")
+    before = len(merged)
+    for p in src_paths:
         merged.update(load_query_emb_cache(p, expected_dim=expected_dim))
     if not merged:
         return 0
     save_query_emb_cache(out_path, merged, expected_dim=expected_dim)
+    logger.info(
+        f"  wrote {out_path} ({len(merged):,} queries"
+        + (f", +{len(merged) - before:,} new)" if additive else ")")
+    )
     return len(merged)
 
 # -----------------------------------------------------------------------------
@@ -462,8 +529,38 @@ def compute_query_bundle(question: str, qtype: str, encoder) -> Dict:
     )[0]
     return {
         "query_emb": q_emb,
-        "qtype_onehot": qtype_onehot(qtype),
     }
+
+def _guard_existing_rank_file(
+    out_path: str, n_queries: int, *, allow_shrink: bool = False
+) -> None:
+    """
+    Refuse to replace a full rank file with a much smaller one.
+
+    A ``--max-queries`` smoke test writes to the same canonical path as the real
+    run, so a five-query test would silently destroy a completed generation.
+    Rank data lives under the gitignored ``data/`` tree and is expensive to
+    rebuild, so this fails loudly instead.
+    """
+    existing = pathlib.Path(out_path)
+    if allow_shrink or not existing.is_file():
+        return
+    try:
+        with open(existing, "r", encoding="utf-8") as f:
+            prior_qids = {
+                json.loads(line).get("qid") for line in f if line.strip()
+            }
+    except (OSError, json.JSONDecodeError):
+        return
+    prior = len(prior_qids - {None})
+    if prior > n_queries * 2 and prior > 20:
+        raise SystemExit(
+            f"Refusing to overwrite {out_path}: it holds {prior:,} queries and this "
+            f"run would write only {n_queries:,}. This is almost always a "
+            "--max-queries smoke test about to destroy a completed generation.\n"
+            "Pass --allow-shrink to proceed, or --out-suffix _smoke to write beside it."
+        )
+
 
 def process_queries(
     queries: List[Dict],
@@ -480,6 +577,7 @@ def process_queries(
     dense_from_retriever_scores: bool = False,
     faiss_lookup: Optional[FaissPassageEmbeddingLookup] = None,
     medcpt_encoder: Optional[MedCPTFeatureEncoder] = None,
+    allow_shrink: bool = False,
 ) -> None:
     """Process queries and generate ranking data."""
     pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -487,6 +585,10 @@ def process_queries(
     if max_queries and len(queries) > max_queries:
         queries = queries[:max_queries]
         logger.info(f"Limited to {max_queries} queries for testing")
+
+    # Checked AFTER --max-queries is applied: the guard must compare against the
+    # number of queries this run will actually write, not the number available.
+    _guard_existing_rank_file(out_path, len(queries), allow_shrink=allow_shrink)
 
     total_queries = 0
     total_records = 0
@@ -535,7 +637,6 @@ def process_queries(
                     f"query_emb dim mismatch for qid={qid}: got={int(q_emb.shape[0])} "
                     f"expected={int(expected_query_feat_dim)}"
                 )
-            qtype_oh = qb["qtype_onehot"]
 
             # Active dense score used by the dense branch. For FAISS hybrids it
             # is the FAISS/PubMedBERT score; for MedCPT hybrids it is the
@@ -563,8 +664,14 @@ def process_queries(
                     )
                 else:
                     active_dense_scores.append(float(cand.get("dense_score", cand.get("score", 0.0))))
-            dense_score_mean = float(np.mean(active_dense_scores))
-            dense_score_std = float(np.std(active_dense_scores) + 1e-8)
+
+            # ── Within-pool normalisation ───────────────────────────────
+            # BM25 and dense similarity live on incompatible, query-varying
+            # scales; the normalisations are defined over the pool, not the
+            # candidate. Built by src/features/build.py, which the live QA path
+            # in src/evaluation/qa_eval.py also calls -- the two used to be
+            # separate implementations and silently drifted apart.
+            active_sparse_scores = sparse_signal_scores(candidates, retriever_type)
 
             q_dense = None
             p_embs: List[np.ndarray] = []
@@ -577,6 +684,15 @@ def process_queries(
                     faiss_lookup=faiss_lookup,
                     medcpt_encoder=medcpt_encoder,
                 )
+
+            built_sparse, built_dense, pool_stats = build_branch_features(
+                question=question,
+                candidates=candidates,
+                retriever_type=retriever_type,
+                idf_table=idf_table,
+                q_dense=None if use_dense_scores else q_dense,
+                p_embs=None if use_dense_scores else p_embs,
+            )
 
             # Process each candidate
             has_positive_in_pool = any(c["id"] in gold_ids for c in candidates)
@@ -611,34 +727,9 @@ def process_queries(
                     dense_score = float(cand.get("medcpt_score", 0.0))
                 elif retriever_type == "spladepp":
                     spladepp_score = float(cand.get("score", cand.get("spladepp_score", 0.0)))
-                
-                # Compute features (use appropriate scores)
-                sparse_signal_score = (
-                    bm25_score
-                    if retriever_type in ("bm25", "hybrid_bm25_faiss", "hybrid_bm25_medcpt")
-                    else spladepp_score
-                )
-                sparse_feats = compute_sparse_features(
-                    query=question,
-                    passage=p_text,
-                    bm25_score=sparse_signal_score,
-                    idf_table=idf_table,
-                ).tolist()
 
-                if use_dense_scores:
-                    # [score, 0, 0, z(score)] keeps expected 4-dim shape with
-                    # retriever-consistent signal at a fraction of the runtime.
-                    ds = active_dense_scores[i]
-                    z = (ds - dense_score_mean) / (dense_score_std + 1e-8)
-                    dense_feats = [float(ds), 0.0, 0.0, float(z)]
-                else:
-                    dense_feats = compute_dense_features_with_score(
-                        q_emb=q_dense,
-                        p_emb=p_embs[i],
-                        dense_score=active_dense_scores[i],
-                        score_mean=dense_score_mean,
-                        score_std=dense_score_std,
-                    ).tolist()
+                sparse_feats = built_sparse[i]
+                dense_feats = built_dense[i]
 
                 sf = np.asarray(sparse_feats, dtype=np.float32)
                 df = np.asarray(dense_feats, dtype=np.float32)
@@ -657,7 +748,10 @@ def process_queries(
                     "gold_passage_ids": list(gold_ids),
                     "sparse_feats": sparse_feats,
                     "dense_feats": dense_feats,
-                    "qtype_onehot": qtype_oh,
+                    # Query-level, identical across this query's candidates.
+                    # Kept out of the branch vectors so the controller can use
+                    # them without the per-candidate scorers seeing constants.
+                    "pool_stats": pool_stats,
                     "retriever_type": retriever_type,
                     "has_positive_in_pool": has_positive_in_pool,
                 }
@@ -762,9 +856,24 @@ def main():
     parser.add_argument(
         "--dataset",
         type=str,
-        choices=["pubmedqa_artificial", "pubmedqa_labeled", "medmcqa", "all"],
+        # Derived from DATASETS so a newly registered collection is selectable
+        # without a second edit here.
+        choices=[*DATASETS.keys(), "all"],
         default="all",
-        help="Dataset to process"
+        help=(
+            "Dataset to process. ``all`` = paper QA sets only "
+            "(pubmedqa_*/medmcqa). ``trec_covid`` is BEIR eval-only and must "
+            "be requested explicitly so existing rank data / caches are safe."
+        ),
+    )
+    parser.add_argument(
+        "--allow-shrink",
+        action="store_true",
+        help=(
+            "Permit overwriting an existing rank file with substantially fewer "
+            "queries. Required for --max-queries smoke tests against a path that "
+            "already holds a full generation."
+        ),
     )
     parser.add_argument(
         "--lean-records",
@@ -796,26 +905,6 @@ def main():
         ),
     )
     parser.add_argument(
-        "--kg-refine-top-n",
-        type=int,
-        default=None,
-        help=(
-            "Compute exact KG distance features only for top-N retrieved candidates per query "
-            "(0 disables; ignored when kg.exact_distance_features=true). "
-            "Good quality/speed trade-off for production."
-        ),
-    )
-    parser.add_argument(
-        "--exact-kg-distances",
-        action="store_true",
-        help="Force exact KG shortest-path distance features for this run.",
-    )
-    parser.add_argument(
-        "--no-exact-kg-distances",
-        action="store_true",
-        help="Disable exact KG shortest-path distance features for this run.",
-    )
-    parser.add_argument(
         "--device",
         type=str,
         choices=["auto", "cuda", "cpu"],
@@ -832,34 +921,12 @@ def main():
         action="store_true",
         help="Keep FAISS on CPU even when --device cuda.",
     )
-    parser.add_argument(
-        "--text-only",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Skip KG feature computation (default: configs/base.yaml model.text_only).",
-    )
-    parser.add_argument(
-        "--passage-entity-cache-max",
-        type=int,
-        default=150_000,
-        help=(
-            "Max unique passage IDs to retain for entity-linking cache (LRU). "
-            "Reduces RAM on large runs; evicted passages are re-linked if seen again. "
-            "Use 0 for unlimited (previous behavior)."
-        ),
-    )
 
     args = parser.parse_args()
-    
+
     cfg = OmegaConf.load("configs/base.yaml")
     set_all_seeds(int(cfg.seed))
     configured_query_feat_dim = int(cfg.model.query_feat_dim)
-
-    if args.text_only is False:
-        raise ValueError(
-            "KG rank-data generation was removed. Omit --no-text-only (text-only is default)."
-        )
-    logger.info("Text-only rank generation (no KG features).")
 
     logger.info(
         "Encoder config | controller query_emb: "
@@ -981,6 +1048,16 @@ def main():
             for dataset_name, dataset_config in DATASETS.items():
                 if args.dataset != "all" and dataset_name != args.dataset:
                     continue
+                if args.dataset == "all" and not dataset_config.get(
+                    "include_in_default_all", True
+                ):
+                    continue
+                if dataset_config.get("eval_only") and args.mode == "unified":
+                    logger.warning(
+                        f"Skipping {dataset_name} in unified mode "
+                        "(eval-only BEIR corpora use per-corpus indices only)."
+                    )
+                    continue
 
                 for split in ["train", "dev", "eval", "test"]:
                     if split in dataset_config:
@@ -1019,6 +1096,7 @@ def main():
                             dense_from_retriever_scores=bool(args.dense_from_retriever_scores),
                             faiss_lookup=faiss_lookup,
                             medcpt_encoder=medcpt_encoder,
+                            allow_shrink=bool(args.allow_shrink),
                         )
                         if not args.no_write_query_cache:
                             cp = query_cache_file(retriever_type, dataset_name, split)
@@ -1034,6 +1112,10 @@ def main():
             for dataset_name, dataset_config in DATASETS.items():
                 if args.dataset != "all" and dataset_name != args.dataset:
                     continue
+                if args.dataset == "all" and not dataset_config.get(
+                    "include_in_default_all", True
+                ):
+                    continue
 
                 corpus_dir = dataset_config.get("corpus")
                 if not corpus_dir:
@@ -1041,13 +1123,16 @@ def main():
                     continue
 
                 # Get corpus JSONL for IDF
-                corpus_jsonl = None
-                if dataset_name == "pubmedqa_artificial":
-                    corpus_jsonl = "data/corpus_pubmedqa_artificial.jsonl"
-                elif dataset_name == "pubmedqa_labeled":
-                    corpus_jsonl = "data/corpus_pubmedqa_labeled.jsonl"
-                elif dataset_name == "medmcqa":
-                    corpus_jsonl = "data/corpus_medmcqa.jsonl"
+                corpus_jsonl = dataset_config.get("corpus_jsonl")
+                if not corpus_jsonl:
+                    if dataset_name == "pubmedqa_artificial":
+                        corpus_jsonl = "data/corpus_pubmedqa_artificial.jsonl"
+                    elif dataset_name == "pubmedqa_labeled":
+                        corpus_jsonl = "data/corpus_pubmedqa_labeled.jsonl"
+                    elif dataset_name == "medmcqa":
+                        corpus_jsonl = "data/corpus_medmcqa.jsonl"
+                    elif dataset_name == "trec_covid":
+                        corpus_jsonl = "data/corpus_trec_covid.jsonl"
 
                 if not corpus_jsonl or not os.path.exists(corpus_jsonl):
                     logger.warning(f"Corpus JSONL not found for {dataset_name}")
@@ -1117,6 +1202,7 @@ def main():
                             dense_from_retriever_scores=bool(args.dense_from_retriever_scores),
                             faiss_lookup=faiss_lookup,
                             medcpt_encoder=medcpt_encoder,
+                            allow_shrink=bool(args.allow_shrink),
                         )
                         if not args.no_write_query_cache:
                             cp = query_cache_file(retriever_type, dataset_name, split)
@@ -1126,15 +1212,33 @@ def main():
 
         if not args.no_write_query_cache:
             rname = normalize_retriever_name(retriever_type)
+            combined_all = f"data/query_emb_cache_{rname}_all.pkl"
+            combined_train = f"data/query_emb_cache_{rname}_train_all.pkl"
+
+            # A single-dataset run only holds that dataset's per-split caches, so
+            # writing the combined caches from them REPLACES ~187k paper queries
+            # with a few hundred. Fold the new splits into whatever is already
+            # there instead. (This used to key off a per-dataset ``eval_only``
+            # flag, which silently failed to protect any newly registered
+            # collection that lacked the flag.)
+            single_dataset_run = args.dataset != "all"
+            if single_dataset_run:
+                logger.info(
+                    f"Single-dataset run ({args.dataset}): merging its query caches "
+                    f"INTO {combined_all} / {combined_train} without dropping "
+                    "queries from other datasets."
+                )
             merge_query_caches(
                 cache_paths_all,
-                f"data/query_emb_cache_{rname}_all.pkl",
+                combined_all,
                 expected_dim=expected_query_feat_dim,
+                additive=single_dataset_run,
             )
             merge_query_caches(
                 cache_paths_train,
-                f"data/query_emb_cache_{rname}_train_all.pkl",
+                combined_train,
                 expected_dim=expected_query_feat_dim,
+                additive=single_dataset_run,
             )
 
     manifest = {

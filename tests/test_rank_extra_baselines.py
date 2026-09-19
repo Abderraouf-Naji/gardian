@@ -9,7 +9,6 @@ from src.evaluation.rank_jsonl_eval import evaluate_all_from_rank_data
 def _pair(qid, pid, label, doc2query=0.0, cross_encoder=0.0, bm25=0.1, dense=0.2):
     sparse = [bm25, 0.0, 0.0]
     dense_f = [dense, 0.0, 0.0, 0.0]
-    kg = [0.0] * 6
     return {
         "qid": qid,
         "pid": pid,
@@ -23,10 +22,7 @@ def _pair(qid, pid, label, doc2query=0.0, cross_encoder=0.0, bm25=0.1, dense=0.2
         "cross_encoder_score": cross_encoder,
         "sparse_feats": sparse,
         "dense_feats": dense_f,
-        "kg_feats": kg,
         "query_emb": [0.0] * 384,
-        "qtype_onehot": [0.0] * 6 + [1.0],
-        "kg_coverage": 0.0,
     }
 
 
@@ -50,7 +46,6 @@ def test_doc2query_evaluated_when_nonzero():
 def _neural_row(qid, pid, label, doc2query, biobert_dense):
     sparse = [doc2query, 0.0, 0.0]
     dense_f = [biobert_dense, 0.0, 0.0, 0.0]
-    kg = [0.0] * 6
     return {
         "qid": qid,
         "pid": pid,
@@ -63,10 +58,7 @@ def _neural_row(qid, pid, label, doc2query, biobert_dense):
         "doc2query_score": doc2query,
         "sparse_feats": sparse,
         "dense_feats": dense_f,
-        "kg_feats": kg,
         "query_emb": [0.0] * 384,
-        "qtype_onehot": [0.0] * 6 + [1.0],
-        "kg_coverage": 0.0,
     }
 
 

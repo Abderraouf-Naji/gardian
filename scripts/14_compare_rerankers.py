@@ -24,7 +24,7 @@ import json
 import pathlib
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 from loguru import logger
@@ -544,7 +544,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = OmegaConf.load(args.cfg)
-    assert_cfg_question_types(cfg.model.question_types)
+    assert_cfg_question_types(cfg.evaluation.question_types)
 
     device = (
         "cuda" if torch.cuda.is_available() else "cpu"

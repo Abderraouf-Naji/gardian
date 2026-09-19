@@ -1,0 +1,72 @@
+{
+  "created_utc": "2026-09-14T16:05:59.468897+00:00",
+  "script": "scripts/04_train_gardian.py",
+  "args": {
+    "retriever": "all",
+    "include_eval_in_dev": false,
+    "no_auto_cache_path": false,
+    "epochs": null,
+    "branch_hidden": null,
+    "controller_hidden": null,
+    "lr": null,
+    "max_train_queries": null,
+    "balance_datasets": false,
+    "num_workers": null,
+    "dropout": null,
+    "denoised": false,
+    "train_datasets": null,
+    "controller_inputs": null,
+    "normalize_branches": null,
+    "no_controller": false,
+    "loss": null,
+    "listwise_group_size": null,
+    "seeds": [
+      42
+    ],
+    "overwrite_seed_artifacts": false,
+    "seed": null
+  },
+  "seed": 42,
+  "git_revision": "a13519e51c781b26f2f14efab241ebf8a698ebdf",
+  "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.39",
+  "python_version": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "torch_version": "2.6.0+cu124",
+  "cuda_version": "12.4",
+  "device": "cuda",
+  "gpu_name": "NVIDIA A40",
+  "summary_path": "results/seeds/seed_42/training_summary_all_retrievers.json",
+  "input_files": {
+    "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_train_all.jsonl": {
+      "exists": true,
+      "sha256": "ef2a70ba053b461ec87cfd24b8d312f761b5b52d2e5a1af7dd881bf52c56b334"
+    },
+    "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_dev_all.jsonl": {
+      "exists": true,
+      "sha256": "263ed056daa49a44e7680288e209262c45f5e53a59f6f6b8c370fa113186b988"
+    },
+    "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_train_all.jsonl": {
+      "exists": true,
+      "sha256": "85298f34739b381df281673fb9d1e2c855be3ef272d8dc254eea314b6a9ba1c8"
+    },
+    "data/hybrid_bm25_medcpt/rank_data_hybrid_bm25_medcpt_dev_all.jsonl": {
+      "exists": true,
+      "sha256": "b03f14249dc3b786283a8109b63f565690704efdcb7334ce55b1c97cdd8430f9"
+    },
+    "data/hybrid_spladepp_faiss/rank_data_hybrid_spladepp_faiss_train_all.jsonl": {
+      "exists": true,
+      "sha256": "0baf5b428fcd44b2d07f43cabe5ba6ce345b514be50a429b4a592335e25c0b42"
+    },
+    "data/hybrid_spladepp_faiss/rank_data_hybrid_spladepp_faiss_dev_all.jsonl": {
+      "exists": true,
+      "sha256": "fd8e2702c2f80047fcdd996cf49c30316d49ec54b819918520bd9e5b53285de4"
+    },
+    "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_train_all.jsonl": {
+      "exists": true,
+      "sha256": "efd441fe6febbc86d4999180156cc2d3672ac5b51add5194500e08fea8cf77a2"
+    },
+    "data/hybrid_spladepp_medcpt/rank_data_hybrid_spladepp_medcpt_dev_all.jsonl": {
+      "exists": true,
+      "sha256": "191c339d6b10a460596bf69c6f82048887d8461dbef34ab59294493ee3e68aef"
+    }
+  }
+}

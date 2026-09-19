@@ -3,13 +3,11 @@ from src.common.question_types import (
     ORDERED_QUESTION_TYPES,
     assert_cfg_question_types,
     normalize_question_type,
-    qtype_onehot,
 )
 
 
 def test_onehot_length_and_axis():
-    assert len(qtype_onehot("diagnosis")) == N_QTYPES == len(ORDERED_QUESTION_TYPES)
-    assert sum(qtype_onehot("mechanism")) == 1.0
+    assert N_QTYPES == len(ORDERED_QUESTION_TYPES)
 
 
 def test_normalize_heuristic():

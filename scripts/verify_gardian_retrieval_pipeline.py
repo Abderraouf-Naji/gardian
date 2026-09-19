@@ -25,14 +25,13 @@ from omegaconf import OmegaConf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.common.question_types import normalize_question_type, qtype_onehot
+from src.common.question_types import normalize_question_type
 from src.model.gardian import build_gardian_from_model_cfg, load_checkpoint_state
 from src.pipeline.gardian_adaptive import (
     adaptive_channel_budgets,
     retrieve_adaptive_candidates_live,
 )
-from src.pipeline.rag_reader import build_retriever_for_qa, resolve_retrieval_paths
-from src.pipeline.rank_dense_features import FaissPassageEmbeddingLookup
+from src.pipeline.rag_reader import build_retriever_for_qa
 from sentence_transformers import SentenceTransformer
 
 
@@ -117,28 +116,26 @@ def main() -> int:
     ok = True
     for item in items:
         q = (item.get("question") or "").strip()
-        qtype = normalize_question_type(item.get("question_type") or "yesno")
+        qtype = normalize_question_type(item.get("question_type") or "other")
         q_emb = encoder.encode([q], normalize_embeddings=True, convert_to_numpy=True)[0].tolist()
-        q_oh = qtype_onehot(qtype)
         pool, alpha, beta = retrieve_adaptive_candidates_live(
             q,
             retriever,
             gardian,
             query_emb=q_emb,
-            qtype_onehot=q_oh,
             cfg=cfg,
             device=device,
         )
         k_s, k_d = adaptive_channel_budgets(alpha, beta, cfg)
-        has_rrf = sum(1 for c in pool if c.get("hybrid_rrf_score", 0) > 0)
+        n_with_rrf = sum(1 for c in pool if c.get("hybrid_rrf_score", 0) > 0)
         ranked = gardian.rerank(
             candidates=[dict(c) for c in pool[: min(80, len(pool))]],
-            query_features={"query_emb": q_emb, "qtype_onehot": q_oh},
+            query_features={"query_emb": q_emb},
             device=device,
         )
         top = ranked[0] if ranked else {}
-        fusion_alpha = float(top.get("sparse_alfa", 0))
-        fusion_beta = float(top.get("dense_alfa", 0))
+        fusion_alpha = float(top.get("alpha_sparse", 0))
+        fusion_beta = float(top.get("alpha_dense", 0))
         reader_k = int(cfg.qa.get("yesno_top_k_passages", cfg.qa.top_k_passages))
         pool_ok = len(pool) <= cap_bm25 + cap_faiss
         if budget_mode in ("full_caps", "full", "fixed", "50+50"):
@@ -149,17 +146,18 @@ def main() -> int:
             budget_ok = k_s == exp_s and k_d == exp_d
         ok = ok and pool_ok and budget_ok
         print(
-            f"\n  qid={item.get('id', '?')[:20]}…"
+            f"\n  qid={item.get('id', '?')[:20]}… [{qtype}]"
             f"\n    controller α_sparse={alpha:.3f} α_dense={beta:.3f}"
             f"\n    retrieve k_bm25={k_s} k_faiss={k_d}  pool={len(pool)} (max {cap_bm25}+{cap_faiss})"
             f"\n    fusion  α_sparse={fusion_alpha:.3f} α_dense={fusion_beta:.3f}"
             f"    gardian_top={top.get('id', '')[:28]}"
             f"\n    reader would see top_k={reader_k} passages (not full pool)"
+            f"\n    pool candidates carrying an RRF score: {n_with_rrf}/{len(pool)}"
         )
         if not budget_ok:
             print(f"    ** budget mismatch (mode={budget_mode})")
         if not pool_ok:
-            print(f"    ** pool larger than channel caps")
+            print("    ** pool larger than channel caps")
 
     print("\n=== Summary ===")
     if ok and budget_mode in ("proportional", "adaptive", ""):

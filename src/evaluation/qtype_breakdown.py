@@ -11,7 +11,6 @@ from loguru import logger
 
 from src.common.question_types import (
     ORDERED_QUESTION_TYPES,
-    QTYPE_TO_IDX,
     normalize_question_type,
 )
 from src.evaluation.rank_jsonl_eval import (
@@ -22,6 +21,7 @@ from src.evaluation.rank_jsonl_eval import (
     iter_rank_jsonl_records,
 )
 from src.evaluation.stats import bootstrap_delta_ci, paired_randomization_pvalue
+from src.features.schema import select_active
 from src.model.gardian import GARDIAN
 from src.pipeline.gardian_adaptive import (
     controller_weights_from_lists,
@@ -141,16 +141,9 @@ def _build_query_buckets(
         if gardian_features is not None:
             gf = gardian_features[qid]
             gf["candidates"].append({"pid": rec["pid"], "label": rec["label"]})
-            gf["sparse_feats"].append(
-                torch.tensor(rec["sparse_feats"], dtype=torch.float32)
-            )
-            gf["dense_feats"].append(
-                torch.tensor(rec["dense_feats"], dtype=torch.float32)
-            )
-            if gf["qtype_onehot"] is None and isinstance(rec.get("qtype_onehot"), list):
-                gf["qtype_onehot"] = torch.tensor(
-                    rec["qtype_onehot"], dtype=torch.float32
-                )
+            _sf, _df = select_active(rec["sparse_feats"], rec["dense_feats"])
+            gf["sparse_feats"].append(torch.tensor(_sf, dtype=torch.float32))
+            gf["dense_feats"].append(torch.tensor(_df, dtype=torch.float32))
             if gf["query_emb"] is None:
                 qe = rec.get("query_emb")
                 if isinstance(qe, list) and qe:
@@ -196,22 +189,26 @@ def _attach_gardian_scores(
                     alpha, beta = controller_weights_from_lists(
                         model,
                         qdata["query_emb"].cpu().tolist(),
-                        qdata["qtype_onehot"].cpu().tolist(),
                         device,
                     )
                     subset = subset_rank_records_adaptive(pool, alpha, beta, cfg)
                     if subset:
                         qdata = {
                             "sparse_feats": [
-                                torch.tensor(r["sparse_feats"], dtype=torch.float32)
+                                torch.tensor(
+                                    select_active(r["sparse_feats"], r["dense_feats"])[0],
+                                    dtype=torch.float32,
+                                )
                                 for r in subset
                             ],
                             "dense_feats": [
-                                torch.tensor(r["dense_feats"], dtype=torch.float32)
+                                torch.tensor(
+                                    select_active(r["sparse_feats"], r["dense_feats"])[1],
+                                    dtype=torch.float32,
+                                )
                                 for r in subset
                             ],
                             "query_emb": qdata["query_emb"],
-                            "qtype_onehot": qdata["qtype_onehot"],
                             "candidates": [
                                 {"pid": r["pid"], "label": r["label"]} for r in subset
                             ],
@@ -220,12 +217,10 @@ def _attach_gardian_scores(
             sparse_batch = torch.stack(qdata["sparse_feats"]).to(device)
             dense_batch = torch.stack(qdata["dense_feats"]).to(device)
             query_emb = qdata["query_emb"].unsqueeze(0).expand(batch_size, -1).to(device)
-            qtype_onehot = qdata["qtype_onehot"].unsqueeze(0).expand(batch_size, -1).to(device)
             scores, _ = model(
                 sparse_feats=sparse_batch,
                 dense_feats=dense_batch,
                 query_emb=query_emb,
-                qtype_onehot=qtype_onehot,
                 ablation=None,
             )
             queries[qid]["gardian_scores"] = scores.cpu().numpy().flatten().tolist()
@@ -257,7 +252,6 @@ def evaluate_by_question_type(
             "sparse_feats": [],
             "dense_feats": [],
             "query_emb": None,
-            "qtype_onehot": None,
             "candidates": [],
         }
     )
@@ -300,10 +294,6 @@ def evaluate_by_question_type(
                 f"Missing query_emb for qid={qid!r}; provide query_encoder_name or embed in rank JSONL."
             )
         gf["query_emb"] = torch.tensor(qe, dtype=torch.float32)
-        if gf["qtype_onehot"] is None:
-            gf["qtype_onehot"] = torch.zeros(len(ORDERED_QUESTION_TYPES), dtype=torch.float32)
-            idx = QTYPE_TO_IDX.get(qid_to_qtype.get(qid, "other"), QTYPE_TO_IDX["other"])
-            gf["qtype_onehot"][idx] = 1.0
 
     _attach_gardian_scores(
         queries,
@@ -412,11 +402,11 @@ def run_qtype_analysis_for_retriever(
     cfg = OmegaConf.load(cfg_path)
     gardian_adaptive = bool(getattr(cfg.qa, "gardian_adaptive_retrieval", False))
     try:
-        model, _expected_qdim = build_paper_model(cfg, compute_device, retriever)
+        model, _expected_qdim = build_paper_model(cfg, compute_device, retriever, seed)
     except RuntimeError as e:
         if "out of memory" in str(e).lower() and str(compute_device).startswith("cuda"):
             logger.warning("CUDA OOM loading model for qtype analysis; using CPU.")
-            model, _expected_qdim = build_paper_model(cfg, "cpu", retriever)
+            model, _expected_qdim = build_paper_model(cfg, "cpu", retriever, seed)
             compute_device = "cpu"
         else:
             raise

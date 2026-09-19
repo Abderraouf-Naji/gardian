@@ -11,6 +11,9 @@ DATASET_INDEX_KEYS: Dict[str, str] = {
     "pubmedqa_artificial": "pubmedqa_artificial",
     "medmcqa": "medmcqa",
     "medqa": "medmcqa",
+    # BEIR TREC-COVID (eval-only IR; public NIST qrels)
+    "trec_covid": "trec_covid",
+    "trec-covid": "trec_covid",
 }
 
 INDICES_ROOT = pathlib.Path("data/indices")

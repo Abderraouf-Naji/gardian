@@ -47,6 +47,7 @@ umls_data.zip
 *.jsonl
 *.pt
 !results/**/*.pt
+!results/**/*.jsonl
 *.bin
 *.index
 *.faiss
@@ -59,3 +60,4 @@ umls_data.zip
 # Local env files
 .env
 .env.*
+.diagnostics/

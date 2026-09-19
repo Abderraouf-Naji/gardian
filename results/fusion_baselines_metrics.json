@@ -1,0 +1,206 @@
+{
+  "hybrid_bm25_faiss": {
+    "pubmedqa_labeled": {
+      "global_alpha_weight": 0.4,
+      "pool_recall": 1.0,
+      "global_alpha": {
+        "ndcg@10": 0.8887755056685689,
+        "mrr": 0.9800863833474013,
+        "recall@10": 0.9047238095238095
+      },
+      "group_alpha": null,
+      "hybrid_check": {
+        "ndcg@10": 0.8083373930771238,
+        "mrr": 0.9609656954372657,
+        "recall@10": 0.8098380952380952
+      }
+    },
+    "pubmedqa_artificial": {
+      "global_alpha_weight": 0.4,
+      "pool_recall": 0.9952793940059282,
+      "global_alpha": {
+        "ndcg@10": 0.7300257910563552,
+        "mrr": 0.8893635483634296,
+        "recall@10": 0.7569080030738828
+      },
+      "group_alpha": null,
+      "hybrid_check": {
+        "ndcg@10": 0.6605196531394899,
+        "mrr": 0.840832858534095,
+        "recall@10": 0.6793317963918468
+      }
+    },
+    "medmcqa": {
+      "global_alpha_weight": 0.5,
+      "pool_recall": 0.8380447585394581,
+      "global_alpha": {
+        "ndcg@10": 0.3977144665598648,
+        "mrr": 0.3495441918807542,
+        "recall@10": 0.5863761287789556
+      },
+      "group_alpha": {
+        "ndcg@10": 0.3986497033518258,
+        "mrr": 0.3501950690734815,
+        "recall@10": 0.5877502944640753
+      },
+      "hybrid_check": {
+        "ndcg@10": 0.3763647202494213,
+        "mrr": 0.33183498474670764,
+        "recall@10": 0.552414605418139
+      }
+    }
+  },
+  "hybrid_bm25_medcpt": {
+    "pubmedqa_labeled": {
+      "global_alpha_weight": 0.37,
+      "pool_recall": 1.0,
+      "global_alpha": {
+        "ndcg@10": 0.8830377503289981,
+        "mrr": 0.9773765873015873,
+        "recall@10": 0.8984309523809524
+      },
+      "group_alpha": null,
+      "hybrid_check": {
+        "ndcg@10": 0.9151148140747349,
+        "mrr": 0.9902746031746031,
+        "recall@10": 0.9261071428571429
+      }
+    },
+    "pubmedqa_artificial": {
+      "global_alpha_weight": 0.37,
+      "pool_recall": 0.9969261170271161,
+      "global_alpha": {
+        "ndcg@10": 0.7519950474384399,
+        "mrr": 0.8943995498469871,
+        "recall@10": 0.7979306180700406
+      },
+      "group_alpha": null,
+      "hybrid_check": {
+        "ndcg@10": 0.762824618356706,
+        "mrr": 0.9068169855638932,
+        "recall@10": 0.8000530610751271
+      }
+    },
+    "medmcqa": {
+      "global_alpha_weight": 0.51,
+      "pool_recall": 0.8409893992932862,
+      "global_alpha": {
+        "ndcg@10": 0.3986713928066296,
+        "mrr": 0.35018456424246863,
+        "recall@10": 0.5895170789163722
+      },
+      "group_alpha": {
+        "ndcg@10": 0.3986172380990309,
+        "mrr": 0.3498808755378187,
+        "recall@10": 0.5906949352179034
+      },
+      "hybrid_check": {
+        "ndcg@10": 0.4020640182543972,
+        "mrr": 0.35226092569052975,
+        "recall@10": 0.5916764821358461
+      }
+    }
+  },
+  "hybrid_spladepp_faiss": {
+    "pubmedqa_labeled": {
+      "global_alpha_weight": 0.48,
+      "pool_recall": 1.0,
+      "global_alpha": {
+        "ndcg@10": 0.9051610868937876,
+        "mrr": 0.9846018315018316,
+        "recall@10": 0.9132333333333333
+      },
+      "group_alpha": null,
+      "hybrid_check": {
+        "ndcg@10": 0.8627123854571694,
+        "mrr": 0.9803699330069255,
+        "recall@10": 0.8647
+      }
+    },
+    "pubmedqa_artificial": {
+      "global_alpha_weight": 0.48,
+      "pool_recall": 0.9963772093533868,
+      "global_alpha": {
+        "ndcg@10": 0.7564633437831969,
+        "mrr": 0.9071975769751172,
+        "recall@10": 0.7816115929300691
+      },
+      "group_alpha": null,
+      "hybrid_check": {
+        "ndcg@10": 0.6961411665590247,
+        "mrr": 0.8675623891708378,
+        "recall@10": 0.7165651187470269
+      }
+    },
+    "medmcqa": {
+      "global_alpha_weight": 0.74,
+      "pool_recall": 0.8788771103258736,
+      "global_alpha": {
+        "ndcg@10": 0.4699088089004312,
+        "mrr": 0.41309065178005167,
+        "recall@10": 0.6796230859835101
+      },
+      "group_alpha": {
+        "ndcg@10": 0.46926022342585777,
+        "mrr": 0.4120237396488538,
+        "recall@10": 0.6802120141342756
+      },
+      "hybrid_check": {
+        "ndcg@10": 0.47032778357306415,
+        "mrr": 0.41426162747957157,
+        "recall@10": 0.6768747546132705
+      }
+    }
+  },
+  "hybrid_spladepp_medcpt": {
+    "pubmedqa_labeled": {
+      "global_alpha_weight": 0.39,
+      "pool_recall": 1.0,
+      "global_alpha": {
+        "ndcg@10": 0.9054032172818783,
+        "mrr": 0.9894199346405228,
+        "recall@10": 0.9126404761904762
+      },
+      "group_alpha": null,
+      "hybrid_check": {
+        "ndcg@10": 0.913684133074677,
+        "mrr": 0.9916183473389356,
+        "recall@10": 0.9197071428571428
+      }
+    },
+    "pubmedqa_artificial": {
+      "global_alpha_weight": 0.39,
+      "pool_recall": 0.9972554616313536,
+      "global_alpha": {
+        "ndcg@10": 0.7524240891996755,
+        "mrr": 0.8989802551112849,
+        "recall@10": 0.7874483111940572
+      },
+      "group_alpha": null,
+      "hybrid_check": {
+        "ndcg@10": 0.7593787804480653,
+        "mrr": 0.9054366075058493,
+        "recall@10": 0.7903913711713689
+      }
+    },
+    "medmcqa": {
+      "global_alpha_weight": 0.7,
+      "pool_recall": 0.8773066352571653,
+      "global_alpha": {
+        "ndcg@10": 0.46192268701751843,
+        "mrr": 0.4055936220797906,
+        "recall@10": 0.6713780918727915
+      },
+      "group_alpha": {
+        "ndcg@10": 0.46580253427237067,
+        "mrr": 0.4083815042417474,
+        "recall@10": 0.6772673733804476
+      },
+      "hybrid_check": {
+        "ndcg@10": 0.4360572969672419,
+        "mrr": 0.38262410062660046,
+        "recall@10": 0.63270514330585
+      }
+    }
+  }
+}

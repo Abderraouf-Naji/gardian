@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pathlib
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from src.common.hybrid_retrievers import FOCUS_HYBRID_RETRIEVERS, SPARSE_DENSE_COMPONENTS
 from src.retrieval.index_paths import DATASET_INDEX_KEYS, resolve_dataset_index_paths

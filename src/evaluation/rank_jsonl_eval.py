@@ -18,11 +18,19 @@ from loguru import logger
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-from src.model.gardian import GARDIAN
-from src.pipeline.gardian_adaptive import (
-    controller_weights_from_lists,
-    subset_rank_records_adaptive,
+from src.evaluation.metrics import hit_at_k, mrr, ndcg_at_k, recall_at_k
+from src.evaluation.qrels import Qrels, qrels_for_qids
+from src.features.pool_features import pool_features_from_records
+from src.common.query_emb_cache import load_query_emb_store
+from src.common.question_types import normalize_question_type
+from src.baselines.fusion import (
+    global_alpha_scores,
+    group_alpha_scores,
+    oracle_alpha_per_query,
+    oracle_rerank_ndcg,
+    pool_recall,
 )
+from src.model.gardian import GARDIAN
 
 
 def load_rank_jsonl(path: str) -> List[Dict[str, Any]]:
@@ -95,40 +103,13 @@ def _batch_encode_query_misses(
     return out
 
 
-def compute_mrr(ranked_ids: List[str], relevant_ids: List[str]) -> float:
-    for rank, pid in enumerate(ranked_ids, 1):
-        if pid in relevant_ids:
-            return 1.0 / rank
-    return 0.0
-
-
-def compute_ndcg(ranked_ids: List[str], relevant_ids: List[str], k: int) -> float:
-    if not relevant_ids:
-        return 0.0
-    dcg = 0.0
-    for i, pid in enumerate(ranked_ids[:k]):
-        if pid in relevant_ids:
-            dcg += 1.0 / np.log2(i + 2)
-    idcg = 0.0
-    for i in range(min(len(relevant_ids), k)):
-        idcg += 1.0 / np.log2(i + 2)
-    return dcg / idcg if idcg > 0 else 0.0
-
-
-def compute_recall(ranked_ids: List[str], relevant_ids: List[str], k: int) -> float:
-    if not relevant_ids:
-        return 0.0
-    retrieved_at_k = set(ranked_ids[:k])
-    relevant_set = set(relevant_ids)
-    return len(retrieved_at_k & relevant_set) / len(relevant_set)
-
-
-def compute_hit_at_k(ranked_ids: List[str], relevant_ids: List[str], k: int) -> float:
-    """Success@k: 1 if any relevant doc appears in top-k, else 0 (per query)."""
-    if not relevant_ids:
-        return 0.0
-    relevant_set = set(relevant_ids)
-    return 1.0 if any(pid in relevant_set for pid in ranked_ids[:k]) else 0.0
+# Metric primitives live in ``src.evaluation.metrics`` so that this module, the
+# question-type breakdown and the trainer's early-stopping all score identically.
+# The ``compute_*`` names are kept as the local vocabulary of this module.
+compute_mrr = mrr
+compute_ndcg = ndcg_at_k
+compute_recall = recall_at_k
+compute_hit_at_k = hit_at_k
 
 
 # Metrics aggregated per system in ``metrics_from_score_key`` / GARDIAN scoring.
@@ -149,6 +130,37 @@ RANK_METRIC_KEYS = [
     "hit@50",
     "mrr",
 ]
+
+
+def _resolve_qrels(qids) -> Tuple[Qrels, bool]:
+    """
+    Full graded judgments for ``qids``, plus whether coverage is complete.
+
+    Falls back to per-query pool labels only where a query has no entry in the
+    qrels sources; that fallback is pool-relative and is reported in ``_meta``
+    so a partially-covered run is never mistaken for a comparable number.
+    """
+    qids = [str(q) for q in qids]
+    try:
+        qrels = qrels_for_qids(qids)
+    except (OSError, ValueError) as exc:
+        logger.warning(f"Could not load qrels ({exc}); falling back to pool labels")
+        return {}, False
+    missing = [q for q in qids if q not in qrels]
+    if missing:
+        logger.warning(
+            f"No qrels for {len(missing)}/{len(qids)} queries "
+            f"(e.g. {missing[:3]}); those fall back to pool-relative labels"
+        )
+    return qrels, not missing
+
+
+def _relevance_for_query(qid: str, qdata: Dict[str, Any], qrels: Qrels):
+    """Graded qrels for ``qid`` when judged, else the in-pool positives."""
+    judged = qrels.get(str(qid))
+    if judged:
+        return judged
+    return [c["pid"] for c in qdata["candidates"] if int(c["label"]) >= 1]
 
 
 def _append_rank_metrics(
@@ -187,6 +199,9 @@ def _new_query_bucket() -> Dict[str, Any]:
         "fusion_scores": [],
         "spladepp_scores": [],
         "cross_encoder_scores": [],
+        "global_alpha_scores": [],
+        "group_alpha_scores": [],
+        "oracle_alpha_scores": [],
     }
 
 
@@ -249,19 +264,27 @@ def evaluate_all_from_rank_data(
     device: Optional[str] = None,
     *,
     gardian_ablation: Optional[str] = None,
+    gardian_fixed_alpha: Optional[float] = None,
     collect_per_query: bool = False,
     query_encoder_name: Optional[str] = None,
     query_encoder_device: str = "cpu",
+    query_emb_cache_path: Optional[str] = None,
     expected_query_feat_dim: Optional[int] = None,
     canonical_baseline_keys: bool = False,
     include_standalone_spladepp: bool = False,
     gardian_adaptive_retrieval: bool = False,
     cfg: Optional[Any] = None,
+    global_alpha: Optional[float] = None,
+    global_alpha_per_query: Optional[Dict[str, float]] = None,
+    group_alphas: Optional[Dict[str, float]] = None,
+    question_types: Optional[Dict[str, str]] = None,
+    include_oracle_alpha: bool = True,
 ) -> Dict[str, Any]:
     """
     Mean metrics over queries; optionally per-query lists for bootstrap CIs.
 
     ``gardian_ablation`` is passed to ``GARDIAN.forward(..., ablation=...)``.
+    ``gardian_fixed_alpha`` is required when ``gardian_ablation="fixed_alpha"``.
 
     When ``canonical_baseline_keys`` is True (paper bundle), baseline metric keys
     reflect the actual first-stage channels (e.g. ``sparse(doc2query)``,
@@ -312,6 +335,10 @@ def evaluate_all_from_rank_data(
         return float(dense_feats[0] if dense_feats else 0.0)
 
     queries: Dict[str, Dict[str, Any]] = defaultdict(_new_query_bucket)
+    # Question type per query, read from the rank records themselves. Group-alpha
+    # needs this at TEST time; requiring the caller to supply it is how the row
+    # silently degenerates into Global-alpha when the mapping is omitted.
+    record_question_types: Dict[str, str] = {}
     first_rec: Optional[Dict[str, Any]] = None
     rank_retriever_type = ""
     query_emb_prefill: Dict[str, List[float]] = {}
@@ -327,6 +354,8 @@ def evaluate_all_from_rank_data(
         if rt and not rank_retriever_type:
             rank_retriever_type = rt
         qid = rec["qid"]
+        if qid not in record_question_types:
+            record_question_types[qid] = normalize_question_type(rec.get("question_type"))
         sparse_score = _resolve_sparse_score(rec)
         dense_score = _resolve_dense_score(rec)
         fusion_score = float(sparse_score) + float(dense_score)
@@ -362,28 +391,50 @@ def evaluate_all_from_rank_data(
     model_query_dim: Optional[int] = (
         int(expected_query_feat_dim) if expected_query_feat_dim is not None else None
     )
-    if model_query_dim is None and model is not None and first_rec is not None:
-        first_layer = getattr(getattr(model, "controller", None), "net", None)
-        try:
-            if first_layer is not None and hasattr(first_layer[0], "in_features"):
-                qtype_dim = len(first_rec.get("qtype_onehot", []))
-                # Controller input is query_feat_dim + n_qtypes (see ControllerMLP).
-                model_query_dim = int(first_layer[0].in_features) - int(qtype_dim)
-        except Exception:
-            model_query_dim = None
+    if model_query_dim is None and model is not None:
+        # The model reports its own query-embedding width, which is correct whether
+        # or not the controller is conditioned on the question type.
+        model_query_dim = getattr(model, "query_feat_dim", None)
+        if model_query_dim is not None:
+            model_query_dim = int(model_query_dim)
 
     query_emb_cache: Dict[str, List[float]] = {}
     if want_query_cache:
-        need_encode = {k: v for k, v in pending_q.items() if k not in query_emb_prefill}
         query_emb_cache = dict(query_emb_prefill)
-        query_emb_cache.update(
-            _batch_encode_query_misses(
-                need_encode,
-                query_encoder_name=query_encoder_name,
-                query_encoder_device=query_encoder_device,
-                model_query_dim=model_query_dim,
+
+        # A precomputed cache covers essentially every query in these splits.
+        # Without it every evaluation re-encodes the whole split with a BERT
+        # forward pass per query -- 18k queries on CPU is ~16 minutes of pure
+        # waste against a cache that is already on disk.
+        if query_emb_cache_path:
+            store = load_query_emb_store(
+                query_emb_cache_path, expected_dim=model_query_dim
             )
-        )
+            if len(store):
+                hits = 0
+                for qid in pending_q:
+                    if qid not in query_emb_cache:
+                        v = store.get(qid)
+                        if v is not None:
+                            query_emb_cache[qid] = (
+                                v.tolist() if hasattr(v, "tolist") else list(v)
+                            )
+                            hits += 1
+                logger.info(
+                    f"query_emb cache {query_emb_cache_path}: "
+                    f"{hits:,}/{len(pending_q):,} queries resolved without encoding"
+                )
+
+        need_encode = {k: v for k, v in pending_q.items() if k not in query_emb_cache}
+        if need_encode:
+            query_emb_cache.update(
+                _batch_encode_query_misses(
+                    need_encode,
+                    query_encoder_name=query_encoder_name,
+                    query_encoder_device=query_encoder_device,
+                    model_query_dim=model_query_dim,
+                )
+            )
 
     query_encoder = None
 
@@ -423,10 +474,7 @@ def evaluate_all_from_rank_data(
         lambda: {
             "sparse_feats": [],
             "dense_feats": [],
-            "kg_feats": [],
             "query_emb": None,
-            "qtype_onehot": None,
-            "kg_coverage": None,
             "candidates": [],
         }
     )
@@ -450,26 +498,19 @@ def evaluate_all_from_rank_data(
             gardian_features[qid]["dense_feats"].append(
                 torch.tensor(rec["dense_feats"], dtype=torch.float32)
             )
-            if not bool(getattr(model, "text_only", True)):
-                gardian_features[qid]["kg_feats"].append(
-                    torch.tensor(rec["kg_feats"], dtype=torch.float32)
-                )
             if gardian_features[qid]["query_emb"] is None:
                 query_emb = _resolve_query_emb(rec)
                 gardian_features[qid]["query_emb"] = torch.tensor(
                     query_emb, dtype=torch.float32
                 )
-                gardian_features[qid]["qtype_onehot"] = torch.tensor(
-                    rec["qtype_onehot"], dtype=torch.float32
-                )
-                if not bool(getattr(model, "text_only", True)):
-                    gardian_features[qid]["kg_coverage"] = rec.get("kg_coverage", 0.0)
 
     for qid, qdata in queries.items():
         qdata["rrf_scores"] = _rrf_scores_for_query(
             qdata["sparse_scores"],
             qdata["dense_scores"],
         )
+
+    qrels, qrels_complete = _resolve_qrels(queries.keys())
 
     def metrics_from_score_key(
         queries_data: Dict[str, Dict[str, Any]],
@@ -482,7 +523,7 @@ def evaluate_all_from_rank_data(
             scores = qdata[score_key]
             sorted_indices = np.argsort(scores)[::-1]
             ranked_ids = [qdata["candidates"][i]["pid"] for i in sorted_indices]
-            relevant_ids = [c["pid"] for c in qdata["candidates"] if c["label"] == 1]
+            relevant_ids = _relevance_for_query(qid, qdata, qrels)
             if not relevant_ids:
                 no_positive_queries += 1
             _append_rank_metrics(lists, ranked_ids, relevant_ids)
@@ -498,6 +539,15 @@ def evaluate_all_from_rank_data(
         "query_count": query_count,
         "retriever_type": rank_retriever_type or None,
         "canonical_baseline_keys": bool(canonical_baseline_keys),
+        "qrels": {
+            "source": "full_graded" if qrels else "pool_labels",
+            "queries_judged": len(qrels),
+            "complete_coverage": bool(qrels_complete),
+            "mean_relevant_per_query": (
+                round(sum(len(v) for v in qrels.values()) / len(qrels), 2) if qrels else None
+            ),
+            "ndcg_gain": "linear",
+        },
         "baseline_keys": {
             "sparse": sparse_key,
             "dense": dense_key,
@@ -530,6 +580,98 @@ def evaluate_all_from_rank_data(
         _emit(label, internal_key)
 
     _emit("rrf", "rrf_scores")
+
+    # ---- score-fusion baselines -------------------------------------------
+    # Global-alpha and Group-alpha are fitted on DEV by the caller and applied
+    # here, which is what makes them honest baselines rather than oracles.
+    # Oracle-alpha picks each query's best alpha using THIS split's labels: it
+    # is a diagnostic ceiling on the whole linear-fusion family, never a system
+    # to compare against. The gap Oracle-alpha - Global-alpha is the entire
+    # maximum payoff of query-adaptive weighting.
+    fusion_pools = {
+        qid: {
+            "pid": [c["pid"] for c in q["candidates"]],
+            "label": [c["label"] for c in q["candidates"]],
+            "sparse": q["sparse_scores"],
+            "dense": q["dense_scores"],
+        }
+        for qid, q in queries.items()
+    }
+    results["_meta"]["pool_recall"] = pool_recall(fusion_pools)
+
+    # A single alpha fitted on dev, or -- for collections with no dev split of
+    # their own -- one alpha per query fitted by cross-validation on the other
+    # folds. The latter is still an honest baseline: no query's alpha is fitted
+    # using that query's own labels.
+    if global_alpha_per_query:
+        for qid, q in queries.items():
+            a = global_alpha_per_query.get(qid, global_alpha)
+            if a is None:
+                continue
+            q["global_alpha_scores"] = list(
+                global_alpha_scores(fusion_pools[qid], float(a))
+            )
+        _emit("global_alpha", "global_alpha_scores")
+        vals = sorted(set(global_alpha_per_query.values()))
+        results["_meta"]["global_alpha_cv"] = {
+            "n_queries": len(global_alpha_per_query),
+            "distinct_alphas": [float(v) for v in vals],
+        }
+    elif global_alpha is not None:
+        for qid, q in queries.items():
+            q["global_alpha_scores"] = list(
+                global_alpha_scores(fusion_pools[qid], float(global_alpha))
+            )
+        _emit("global_alpha", "global_alpha_scores")
+        results["_meta"]["global_alpha"] = float(global_alpha)
+
+    if group_alphas:
+        qtypes = question_types or record_question_types
+        unmapped = sum(1 for qid in queries if qtypes.get(qid) not in group_alphas)
+        if unmapped:
+            logger.warning(
+                f"group_alpha: {unmapped:,}/{len(queries):,} queries have no fitted "
+                "group and fall back to the global alpha; for those the row is "
+                "Global-alpha, not Group-alpha"
+            )
+        for qid, q in queries.items():
+            q["group_alpha_scores"] = list(
+                group_alpha_scores(
+                    fusion_pools[qid], qtypes.get(qid, "other"), group_alphas
+                )
+            )
+        _emit("group_alpha", "group_alpha_scores")
+        results["_meta"]["group_alphas"] = dict(group_alphas)
+
+    if include_oracle_alpha:
+        oracle = oracle_alpha_per_query(fusion_pools, k=10)
+        best = oracle.get("best_alpha", {})
+        for qid, q in queries.items():
+            a = best.get(qid)
+            q["oracle_alpha_scores"] = (
+                list(global_alpha_scores(fusion_pools[qid], float(a)))
+                if a is not None
+                else list(q["rrf_scores"])
+            )
+        _emit("oracle_alpha", "oracle_alpha_scores")
+        # The per-query alpha maximises nDCG@k for ONE k. Applying that same
+        # alpha at other cutoffs is not a ceiling and can score *below* the
+        # system it is supposed to bound (observed on TREC-COVID: oracle
+        # nDCG@20 0.6517 < GARDIAN 0.6761). Blank every metric it does not
+        # actually bound rather than printing a number that reads as an upper
+        # limit but is not one.
+        oracle_k = 10
+        keep = {f"ndcg@{oracle_k}"}
+        results["oracle_alpha"] = {
+            k: (v if k in keep else None) for k, v in results["oracle_alpha"].items()
+        }
+        results["_meta"]["oracle_alpha_valid_cutoff"] = oracle_k
+        results["_meta"]["oracle_alpha"] = {
+            k: v for k, v in oracle.items() if k != "best_alpha"
+        }
+        results["_meta"]["oracle_rerank_ndcg@10"] = oracle_rerank_ndcg(
+            fusion_pools, k=10
+        )
     skip_standalone_spladepp = bool(
         not include_standalone_spladepp
         or (canonical_baseline_keys and sparse_key == "sparse(spladepp)")
@@ -548,15 +690,23 @@ def evaluate_all_from_rank_data(
         _emit("cross_encoder", "cross_encoder_scores")
 
     if model is not None and device is not None and gardian_features:
-        use_adaptive = bool(gardian_adaptive_retrieval and cfg is not None)
-        if use_adaptive:
-            logger.info(
-                "  GARDIAN adaptive retrieval: query→(α,β)→sparse/dense subset→fusion "
-                f"(ablation={gardian_ablation!r})"
-            )
-        else:
-            logger.info(f"  Evaluating GARDIAN (ablation={gardian_ablation!r})...")
-        results["_meta"]["gardian_adaptive_retrieval"] = use_adaptive
+        # The adaptive *channel budget* is a live-QA retrieval policy (see
+        # src/pipeline/gardian_adaptive.py). Offline rank-JSONL evaluation
+        # deliberately does NOT apply it: pre-subsetting the pool by
+        # (alpha, beta) dropped gold passages that rank high under RRF but low
+        # in either single channel, which inflated GARDIAN's retrieval metrics
+        # relative to the baselines scored on the full pool. GARDIAN is
+        # therefore scored on exactly the same candidates as sparse/dense/RRF;
+        # the controller still supplies the per-query fusion weights inside
+        # ``GARDIAN.forward``.
+        adaptive_requested = bool(gardian_adaptive_retrieval and cfg is not None)
+        logger.info(
+            f"  Evaluating GARDIAN on the full rank pool (ablation={gardian_ablation!r}; "
+            f"adaptive channel budget requested={adaptive_requested}, "
+            "not applied offline -- same pool as all baselines)"
+        )
+        results["_meta"]["gardian_adaptive_retrieval_requested"] = adaptive_requested
+        results["_meta"]["gardian_scored_on_full_pool"] = True
 
         gardian_results: Dict[str, Dict[str, Any]] = defaultdict(
             lambda: {"candidates": [], "scores": []}
@@ -569,40 +719,26 @@ def evaluate_all_from_rank_data(
             ):
                 if not qdata["candidates"]:
                     continue
-                # Score the FULL rank pool (same candidates as RRF). Pre-subsetting by
-                # adaptive_channel_budget dropped high-RRF / low-single-channel gold
-                # docs and inflated retrieval metrics vs E2E QA unfairly.
-                if use_adaptive and qdata["query_emb"] is not None:
-                    pool_records = records_by_qid.get(qid, [])
-                    if pool_records:
-                        controller_weights_from_lists(
-                            model,
-                            qdata["query_emb"].cpu().tolist(),
-                            qdata["qtype_onehot"].cpu().tolist(),
-                            device,
-                            ablation=gardian_ablation,
-                        )
-                batch_size = len(qdata["candidates"])
-                sparse_batch = torch.stack(qdata["sparse_feats"]).to(device)
-                dense_batch = torch.stack(qdata["dense_feats"]).to(device)
-                query_emb = qdata["query_emb"].unsqueeze(0).expand(batch_size, -1).to(device)
-                qtype_onehot = qdata["qtype_onehot"].unsqueeze(0).expand(batch_size, -1).to(device)
+                # One pool per forward, kept in grouped (1, N, F) form. The
+                # model may standardise each branch within its pool and the
+                # controller may read pool features, both of which are defined
+                # per query -- a flat batch has no pool to define them over.
+                sparse_batch = torch.stack(qdata["sparse_feats"]).unsqueeze(0).to(device)
+                dense_batch = torch.stack(qdata["dense_feats"]).unsqueeze(0).to(device)
+                query_emb = qdata["query_emb"].unsqueeze(0).to(device)
+                pool_feats = torch.from_numpy(
+                    pool_features_from_records(records_by_qid[qid])
+                ).unsqueeze(0).to(device)
+                mask = torch.ones(sparse_batch.shape[:2], dtype=torch.float32, device=device)
                 fwd = {
                     "sparse_feats": sparse_batch,
                     "dense_feats": dense_batch,
                     "query_emb": query_emb,
-                    "qtype_onehot": qtype_onehot,
+                    "pool_feats": pool_feats,
+                    "mask": mask,
                     "ablation": gardian_ablation,
+                    "fixed_alpha": gardian_fixed_alpha,
                 }
-                if not bool(getattr(model, "text_only", True)):
-                    kg_batch = torch.stack(qdata["kg_feats"]).to(device)
-                    kg_coverage = torch.full(
-                        (batch_size,),
-                        float(qdata.get("kg_coverage") or 0.0),
-                        dtype=torch.float32,
-                    ).to(device)
-                    fwd["kg_feats"] = kg_batch
-                    fwd["kg_coverage"] = kg_coverage
                 scores, _ = model(**fwd)
                 gardian_results[qid]["candidates"] = qdata["candidates"]
                 gardian_results[qid]["scores"] = scores.cpu().numpy().flatten()
@@ -614,7 +750,7 @@ def evaluate_all_from_rank_data(
                 continue
             sorted_indices = np.argsort(qdata["scores"])[::-1]
             ranked_ids = [qdata["candidates"][i]["pid"] for i in sorted_indices]
-            relevant_ids = [c["pid"] for c in qdata["candidates"] if c["label"] == 1]
+            relevant_ids = _relevance_for_query(qid, qdata, qrels)
             if not relevant_ids:
                 no_positive_queries += 1
             _append_rank_metrics(lists, ranked_ids, relevant_ids)

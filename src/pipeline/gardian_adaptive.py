@@ -135,7 +135,6 @@ def retrieve_adaptive_candidates_live(
     gardian_model: torch.nn.Module,
     *,
     query_emb: List[float],
-    qtype_onehot: List[float],
     cfg: Any,
     device: str = "cuda",
     ablation: Optional[str] = None,
@@ -146,8 +145,7 @@ def retrieve_adaptive_candidates_live(
     ``retriever`` must be a ``DualHybridRetriever`` subclass (``.first`` / ``.second``).
     """
     q_t = torch.tensor(query_emb, dtype=torch.float32, device=device)
-    qt_t = torch.tensor(qtype_onehot, dtype=torch.float32, device=device)
-    weights = gardian_model.controller_weights(q_t, qt_t, ablation=ablation)
+    weights = gardian_model.controller_weights(q_t, ablation=ablation)
     alpha = float(weights[0, 0].item())
     beta = float(weights[0, 1].item())
     k_sparse, k_dense = adaptive_channel_budgets(alpha, beta, cfg)
@@ -200,12 +198,10 @@ def subset_rank_records_adaptive(
 def controller_weights_from_lists(
     gardian_model: torch.nn.Module,
     query_emb: List[float],
-    qtype_onehot: List[float],
     device: str,
     *,
     ablation: Optional[str] = None,
 ) -> Tuple[float, float]:
     q_t = torch.tensor(query_emb, dtype=torch.float32, device=device)
-    qt_t = torch.tensor(qtype_onehot, dtype=torch.float32, device=device)
-    w = gardian_model.controller_weights(q_t, qt_t, ablation=ablation)
+    w = gardian_model.controller_weights(q_t, ablation=ablation)
     return float(w[0, 0].item()), float(w[0, 1].item())

@@ -8,6 +8,32 @@ from typing import List, Dict, Optional
 from loguru import logger
 import bm25s
 
+try:
+    import Stemmer as _pystemmer
+except ImportError:  # pragma: no cover - PyStemmer is a hard dep of the BM25 path
+    _pystemmer = None
+
+# BEIR's BM25 baseline stems both sides with Porter. bm25s applies no stemmer by
+# default, which is the single largest gap between our BM25 and the published
+# TREC-COVID number (nDCG@10 .563 unstemmed vs .656 published). ``k1``/``b`` stay
+# at the bm25s "lucene" defaults: sweeping them to BEIR's (0.9/0.4) measured
+# *worse* here (.578), so only the stemmer is changed.
+DEFAULT_STEMMER = "porter"
+DEFAULT_K1 = 1.5
+DEFAULT_B = 0.75
+
+
+def _make_stemmer(name: Optional[str]):
+    """Build a bm25s-compatible stemmer callable, or ``None`` for no stemming."""
+    if not name or name == "none":
+        return None
+    if _pystemmer is None:
+        raise ImportError(
+            f"stemmer={name!r} requested but PyStemmer is not installed "
+            "(pip install PyStemmer)"
+        )
+    return _pystemmer.Stemmer(name)
+
 
 class BM25Retriever:
     """
@@ -15,14 +41,31 @@ class BM25Retriever:
     Can load from saved index or build from corpus.
     """
 
-    def __init__(self, index_dir: Optional[str] = None, corpus_jsonl: Optional[str] = None):
+    def __init__(
+        self,
+        index_dir: Optional[str] = None,
+        corpus_jsonl: Optional[str] = None,
+        *,
+        stemmer: Optional[str] = DEFAULT_STEMMER,
+        k1: float = DEFAULT_K1,
+        b: float = DEFAULT_B,
+    ):
         """
         Either load from saved index directory OR build from corpus file.
         
         Args:
             index_dir: Directory containing saved BM25 index (index.pkl, metadata.pkl)
             corpus_jsonl: Path to corpus JSONL file to build index from
+            stemmer: PyStemmer algorithm name, or "none". Ignored when loading an
+                index -- the stemmer recorded at build time wins, because querying
+                a stemmed index with unstemmed tokens silently loses recall.
+            k1, b: BM25 parameters (build-time only, same reasoning).
         """
+        self.stemmer_name = stemmer
+        self.k1 = float(k1)
+        self.b = float(b)
+        self._stemmer = _make_stemmer(stemmer)
+
         if index_dir and Path(index_dir).exists():
             self._load_from_disk(index_dir)
         elif corpus_jsonl:
@@ -50,8 +93,23 @@ class BM25Retriever:
             metadata = pickle.load(f)
             self.doc_ids = metadata["doc_ids"]
             self.docs = metadata["docs"]
-        
-        logger.success(f"BM25 index loaded ({len(self.doc_ids):,} passages)")
+
+        # The index defines the token space; adopt its analyzer rather than the
+        # constructor's, so query tokenisation can never drift from the index.
+        self.stemmer_name = metadata.get("stemmer", "none")
+        self.k1 = float(metadata.get("k1", DEFAULT_K1))
+        self.b = float(metadata.get("b", DEFAULT_B))
+        self._stemmer = _make_stemmer(self.stemmer_name)
+        if self.stemmer_name in (None, "none"):
+            logger.warning(
+                f"BM25 index at {index_dir} was built without a stemmer; "
+                "rebuild it to match the BEIR baseline (see DEFAULT_STEMMER)."
+            )
+
+        logger.success(
+            f"BM25 index loaded ({len(self.doc_ids):,} passages | "
+            f"stemmer={self.stemmer_name} k1={self.k1} b={self.b})"
+        )
 
     def _build_from_corpus(self, corpus_jsonl: str):
         """Build BM25 index from corpus file."""
@@ -72,11 +130,14 @@ class BM25Retriever:
                 self.docs.append(combined)
         logger.info(f"  Loaded {len(self.docs):,} passages")
 
-        logger.info("Building BM25 index in memory with bm25s …")
-        # Tokenize corpus once
-        corpus_tokens = bm25s.tokenize(self.docs, stopwords="en")
+        logger.info(
+            f"Building BM25 index in memory with bm25s "
+            f"(stemmer={self.stemmer_name} k1={self.k1} b={self.b}) …"
+        )
+        # Tokenize corpus once, with the same analyzer retrieve() will use.
+        corpus_tokens = bm25s.tokenize(self.docs, stopwords="en", stemmer=self._stemmer)
         # Use lucene method for good default performance
-        self.bm25 = bm25s.BM25(method="lucene")
+        self.bm25 = bm25s.BM25(method="lucene", k1=self.k1, b=self.b)
         self.bm25.index(corpus_tokens)
         logger.success("BM25 index ready")
 
@@ -97,7 +158,10 @@ class BM25Retriever:
             "doc_ids": self.doc_ids,
             "docs": self.docs,
             "num_docs": len(self.docs),
-            "method": "lucene"
+            "method": "lucene",
+            "stemmer": self.stemmer_name or "none",
+            "k1": self.k1,
+            "b": self.b,
         }
         with open(metadata_path, "wb") as f:
             pickle.dump(metadata, f)
@@ -106,7 +170,7 @@ class BM25Retriever:
 
     def retrieve(self, query: str, top_k: int = 50) -> List[Dict]:
         """Retrieve top-k passages for a query."""
-        query_tokens = bm25s.tokenize(query, stopwords="en")
+        query_tokens = bm25s.tokenize(query, stopwords="en", stemmer=self._stemmer)
         doc_idxs, scores = self.bm25.retrieve(query_tokens, k=top_k)
         doc_idxs = doc_idxs[0]
         scores = scores[0]
@@ -127,7 +191,9 @@ class BM25Retriever:
 
     def batch_retrieve(self, queries: List[str], top_k: int = 50) -> List[List[Dict]]:
         """Batch retrieve for multiple queries."""
-        q_tokens = bm25s.tokenize(queries, stopwords="en")
+        q_tokens = bm25s.tokenize(
+            queries, stopwords="en", stemmer=self._stemmer, show_progress=False
+        )
         all_idxs, all_scores = self.bm25.retrieve(q_tokens, k=top_k)
 
         out: List[List[Dict]] = []
@@ -148,12 +214,19 @@ class BM25Retriever:
         return out
 
 
-def build_bm25_index(corpus_jsonl: str, index_dir: str):
+def build_bm25_index(
+    corpus_jsonl: str,
+    index_dir: str,
+    *,
+    stemmer: Optional[str] = DEFAULT_STEMMER,
+    k1: float = DEFAULT_K1,
+    b: float = DEFAULT_B,
+):
     """
     Build and save BM25 index from corpus JSONL.
     This is the main function called by 01_build_index.py.
     """
     logger.info(f"Building BM25 index from {corpus_jsonl}")
-    retriever = BM25Retriever(corpus_jsonl=corpus_jsonl)
+    retriever = BM25Retriever(corpus_jsonl=corpus_jsonl, stemmer=stemmer, k1=k1, b=b)
     retriever.save(index_dir)
     logger.success(f"BM25 index saved to {index_dir}")

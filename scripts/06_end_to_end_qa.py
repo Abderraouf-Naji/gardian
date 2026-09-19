@@ -37,7 +37,12 @@ from omegaconf import OmegaConf
 sys.path.insert(0, ".")
 
 from src.common.question_types import assert_cfg_question_types
+from src.evaluation.task_baselines import (
+    annotate_dataset_block as _annotate_dataset_block,
+    baseline_inputs_for_dataset as _baseline_inputs_for_dataset,
+)
 from src.common.rank_data_paths import normalize_retriever_name, resolve_rank_data_file
+from src.common.seeds import resolve_seed_checkpoint
 from src.evaluation.pubmedqa_rag import (
     build_gold_passage_lookup,
     is_pubmedqa_dataset,
@@ -204,20 +209,35 @@ def _dataset_block_complete_for_systems(
     return ok
 
 
-def _build_model(cfg, device: str, retriever: str):
-    # Prefer canonical checkpoint path used for final QA (results/gardian.pt),
-    # then fall back to retriever-specific training artifact.
+def _build_model(cfg, device: str, retriever: str, seed: int = 42):
+    """
+    Load the GARDIAN checkpoint for one ``(retriever, seed)`` cell.
+
+    Training writes per-seed artifacts to ``results/seeds/seed_<S>/``, so the
+    per-seed path is tried first and the flat legacy path only as a fallback
+    (``resolve_seed_checkpoint`` warns when it has to fall back, which keeps a
+    stale single-seed checkpoint from being reported as a multi-seed result).
+    An explicit ``qa.gardian_checkpoint`` still wins over both.
+    """
     canonical = normalize_retriever_name(retriever)
     explicit_ckpt = getattr(cfg.qa, "gardian_checkpoint", None)
-    ckpt_candidates: List[pathlib.Path] = []
+    ckpt_path: Optional[pathlib.Path] = None
     if explicit_ckpt:
-        ckpt_candidates.append(pathlib.Path(str(explicit_ckpt)))
-    ckpt_candidates.append(pathlib.Path(cfg.paths.results_dir) / "gardian.pt")
-    ckpt_candidates.append(pathlib.Path(cfg.paths.results_dir) / f"gardian_best_{canonical}.pt")
-    ckpt_path = next((p for p in ckpt_candidates if p.exists()), None)
-    if ckpt_path is None:
-        tried = ", ".join(str(p) for p in ckpt_candidates)
-        raise FileNotFoundError(f"Checkpoint not found. Tried: {tried}")
+        candidate = pathlib.Path(str(explicit_ckpt))
+        if not candidate.exists():
+            raise FileNotFoundError(
+                f"qa.gardian_checkpoint points at a missing file: {candidate}"
+            )
+        ckpt_path = candidate
+    else:
+        try:
+            ckpt_path = resolve_seed_checkpoint(cfg.paths.results_dir, canonical, seed)
+        except FileNotFoundError:
+            fallback = pathlib.Path(cfg.paths.results_dir) / "gardian.pt"
+            if fallback.exists():
+                ckpt_path = fallback
+            else:
+                raise
     ckpt = torch.load(ckpt_path, map_location=device)
     ckpt_model_cfg = ckpt.get("cfg", {}).get("model") if isinstance(ckpt.get("cfg"), dict) else None
     model = build_gardian_from_model_cfg(ckpt_model_cfg or cfg.model)
@@ -530,9 +550,24 @@ def parse_args():
         ),
     )
     args = p.parse_args()
-    if getattr(args, "rq4", False):
+    # --rq4 locks the *protocol*. It also supplies the default system set, but
+    # an explicit --systems always wins: the RQ3 table needs only the
+    # RRF-vs-GARDIAN contrast, and forcing the sparse/dense channel rows back
+    # in doubles the reader cost of every cell.
+    if getattr(args, "rq4", False) and not _flag_was_passed("--systems"):
         args.systems = "sparse,dense,hybrid,gardian"
     return args
+
+
+def _flag_was_passed(flag: str) -> bool:
+    """
+    Whether *flag* appears in ``sys.argv`` (``--x value`` or ``--x=value``).
+
+    argparse cannot distinguish "user typed the default" from "user typed
+    nothing", and that distinction decides whether --rq4 may overwrite
+    --systems.
+    """
+    return any(a == flag or a.startswith(f"{flag}=") for a in sys.argv[1:])
 
 
 def _checkpoint_every_dataset(args: argparse.Namespace) -> bool:
@@ -770,19 +805,6 @@ def _apply_qa_speed_overrides(cfg: Any, args: argparse.Namespace) -> None:
         cfg.qa.reader_max_input_length = int(args.reader_max_input_length)
     if getattr(args, "max_chars_per_passage", None) is not None:
         cfg.qa["max_chars_per_passage"] = int(args.max_chars_per_passage)
-
-
-def _require_kg_artifacts(cfg) -> None:
-    if bool(getattr(cfg.model, "text_only", True)):
-        return
-    kg_p = pathlib.Path(cfg.paths.kg_graph)
-    lex_p = pathlib.Path(cfg.paths.kg_lexical_idx)
-    if kg_p.is_file() and lex_p.is_file():
-        return
-    raise FileNotFoundError(
-        f"KG artifacts required for legacy KG-enabled GARDIAN: "
-        f"graph={kg_p}, lexical={lex_p}"
-    )
 
 
 def _use_per_dataset_indices(
@@ -1051,10 +1073,29 @@ def _eval_all_datasets(
             "metrics_note": (
                 "answer_accuracy and citation_* arrays are bootstrap 95% CI: "
                 "[mean, ci95_low, ci95_high] (see also *_ci objects). "
-                "Citation metrics are PubMedQA-only (null for MedMCQA). "
+                "Citation metrics are PubMedQA-only (null for MedMCQA: it ships "
+                "explanations, not passage-level evidence annotation). "
+                "gold_evidence_in_context_rate is FRACTIONAL gold coverage; "
+                "gold_evidence_in_context_any is the binary companion. "
+                "unsupported_claim_rate excludes answers that cite nothing, so "
+                "answer_without_citation_rate is reported beside it. "
                 "llm_only, hybrid, and gardian share the same reader LLM; RAG systems add passages."
             ),
         }
+        # Every accuracy is stored next to the trivial baseline it must beat.
+        # MedMCQA is keyed on the answer LETTER and carries a random-choice
+        # baseline; PubMedQA on the yes/no/maybe label. See task_baselines.
+        try:
+            _baseline_labels, _baseline_n_options = _baseline_inputs_for_dataset(
+                dataset_name, questions
+            )
+            _annotate_dataset_block(
+                datasets_payload[dataset_name],
+                _baseline_labels,
+                n_options=_baseline_n_options,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning(f"Could not attach task baselines for {dataset_name}: {exc}")
         logger.info(
             f"Completed QA eval for {dataset_name} | retriever={retriever} | systems={list(agg_out.keys())}"
         )
@@ -1071,7 +1112,9 @@ def _load_reader_model(cfg, device: str, *, load_in_4bit: bool = False):
 def main():
     args = parse_args()
     cfg0 = OmegaConf.load(args.cfg)
-    assert_cfg_question_types(cfg0.model.question_types)
+    # Question type is an analysis dimension only; it was removed as a model
+    # input (docs/QUESTION_TYPE.md), so the list lives under `evaluation`.
+    assert_cfg_question_types(cfg0.evaluation.question_types)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     results_dir = pathlib.Path(str(cfg0.paths.results_dir))
 
@@ -1138,7 +1181,7 @@ def main():
     runs: List[Dict[str, Any]] = []
     for reader_name, retriever in product(readers, retrievers):
         cfg = OmegaConf.load(args.cfg)
-        assert_cfg_question_types(cfg.model.question_types)
+        assert_cfg_question_types(cfg.evaluation.question_types)
         cfg.qa.reader_model = reader_name
         if getattr(args, "rq4", False):
             _apply_rq4_protocol_cfg(cfg)
@@ -1161,7 +1204,7 @@ def main():
         gardian_model: Optional[torch.nn.Module] = None
         if "gardian" in systems:
             try:
-                gardian_model = _build_model(cfg, device, retriever)
+                gardian_model = _build_model(cfg, device, retriever, seed=int(args.seed))
             except FileNotFoundError as e:
                 logger.error(f"Skipping cell reader={reader_name!r} retriever={retriever!r}: {e}")
                 del reader
@@ -1198,6 +1241,7 @@ def main():
                 _retriever: str = retriever,
                 _cache: List[str] = query_emb_cache_paths,
                 _faiss_gpu: bool = faiss_gpu_flag,
+                _rq4_meta: Dict[str, Any] = rq4_meta,
             ) -> None:
                 meta_ckpt: Dict[str, Any] = {
                     "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -1211,7 +1255,7 @@ def main():
                     "faiss_use_gpu": _faiss_gpu,
                     "query_emb_cache": _cache,
                     "resumed_from": str(resume_path) if resume_path else None,
-                    "rq4_protocol": rq4_meta,
+                    "rq4_protocol": _rq4_meta,
                 }
                 if datasets_so_far.get("_retrieval_paths"):
                     meta_ckpt["retrieval_paths_by_dataset"] = datasets_so_far[

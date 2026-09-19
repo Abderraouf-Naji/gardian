@@ -54,13 +54,29 @@ def main() -> None:
         ("medrag_pubmed", "data/corpus_medrag_pubmed.jsonl"),
         ("unified", "data/indices/unified/corpus_unified.jsonl"),
     ]
+    # Eval-only BEIR sets: never part of ``--dataset all`` (avoids accidental
+    # rebuild of paper indices / unified). Request explicitly.
+    optional_corpora = [
+        ("trec_covid", "data/corpus_trec_covid.jsonl"),
+        # BEIR retrieval collections, small enough to index beside the paper
+        # corpora (nfcorpus ~3.6k passages, scifact ~5k).
+        ("nfcorpus", "data/corpus_nfcorpus.jsonl"),
+        ("scifact", "data/corpus_scifact.jsonl"),
+    ]
+    if args.dataset == "all":
+        selected = corpora
+    elif args.dataset in {n for n, _ in optional_corpora}:
+        selected = [(n, p) for n, p in optional_corpora if n == args.dataset]
+    else:
+        selected = corpora
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     logger.info("=" * 72)
     logger.info("Building Neural Indices (real SPLADE++ + MedCPT)")
     logger.info("=" * 72)
 
-    for name, corpus in corpora:
+    for name, corpus in selected:
         if args.dataset != "all" and name != args.dataset:
             continue
         if not os.path.exists(corpus):

@@ -21,9 +21,8 @@ import pathlib
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, List
+from typing import Dict
 
-import numpy as np
 import torch
 from loguru import logger
 from omegaconf import OmegaConf
@@ -47,7 +46,7 @@ from sentence_transformers import SentenceTransformer
 
 sys.path.insert(0, ".")
 
-from src.common.question_types import assert_cfg_question_types, normalize_question_type, qtype_onehot
+from src.common.question_types import assert_cfg_question_types, normalize_question_type
 from src.common.rank_data_paths import normalize_retriever_name
 from src.evaluation.qa_eval import _enrich_live_candidates_for_gardian
 from src.model.gardian import GARDIAN, build_gardian_from_model_cfg, load_checkpoint_state
@@ -84,14 +83,6 @@ def infer_qtype(question: str, fallback: str) -> str:
     return "factoid"
 
 
-def _require_kg_artifacts(cfg) -> None:
-    kg_p = pathlib.Path(cfg.paths.kg_graph)
-    lex_p = pathlib.Path(cfg.paths.kg_lexical_idx)
-    if kg_p.is_file() and lex_p.is_file():
-        return
-    raise FileNotFoundError(f"Missing KG artifacts: graph={kg_p}, lexical={lex_p}")
-
-
 def load_gardian(cfg, retriever: str, device: str) -> GARDIAN:
     out_dir = pathlib.Path(cfg.paths.results_dir)
     canonical = normalize_retriever_name(retriever)
@@ -126,7 +117,7 @@ class GardianRuntime:
         no_reader: bool = False,
     ):
         self.cfg = OmegaConf.load(cfg_path)
-        assert_cfg_question_types(self.cfg.model.question_types)
+        assert_cfg_question_types(self.cfg.evaluation.question_types)
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.retriever_name = normalize_retriever_name(retriever_name)
         pool_default = int(getattr(self.cfg.retrieval, "candidate_pool_size", 100))
@@ -212,13 +203,13 @@ class GardianRuntime:
         )
         ranked = self.gardian.rerank(
             candidates=candidates,
-            query_features={"query_emb": q_emb, "qtype_onehot": qtype_oh},
+            query_features={"query_emb": q_emb},
             device=self.device,
         )
         top_for_reader = ranked[: self.top_passages]
         first = ranked[0]
-        sparse_alfa = float(first["sparse_alfa"])
-        dense_alfa = float(first["dense_alfa"])
+        alpha_sparse = float(first["alpha_sparse"])
+        alpha_dense = float(first["alpha_dense"])
 
         if skip_reader:
             answer = ""
@@ -235,8 +226,8 @@ class GardianRuntime:
                 max_new_tokens=self.max_new_tokens,
                 max_input_length=int(self.cfg.qa.get("reader_max_input_length", 2048) or 2048),
                 question_type=qtype,
-                alpha_sparse=sparse_alfa,
-                alpha_dense=dense_alfa,
+                alpha_sparse=alpha_sparse,
+                alpha_dense=alpha_dense,
                 include_signal_features=True,
                 use_react=use_react,
                 react_max_steps=react_max_steps,
@@ -253,8 +244,8 @@ class GardianRuntime:
             "reader_react": use_react,
             "answer": answer,
             "fusion_formula": "score = alpha_sparse*sparse + alpha_dense*dense",
-            "sparse_alfa": sparse_alfa,
-            "dense_alfa": dense_alfa,
+            "alpha_sparse": alpha_sparse,
+            "alpha_dense": alpha_dense,
             "rag_how_used": (
                 "BM25+FAISS candidates → GARDIAN rerank by fused branch scores → "
                 "top passages sent to the reader LLM."

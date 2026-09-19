@@ -8,88 +8,121 @@ from __future__ import annotations
 import json
 import math
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Union
 import torch
 from loguru import logger
 from sentence_transformers import SentenceTransformer
 from pathlib import Path
 
-from src.common.question_types import normalize_question_type
-from src.common.query_emb_cache import load_query_emb_cache
+from src.common.query_emb_cache import QueryEmbStore, load_query_emb_store
+from src.features.schema import active_feature_indices
 
 
-def recall_at_k(ranked_ids: List[str], relevant_ids: set, k: int) -> float:
-    """Per-query success@k (1 if any relevant in top-k). Mean over queries = Hit@k."""
-    return 1.0 if any(r in relevant_ids for r in ranked_ids[:k]) else 0.0
+Relevance = Union[Iterable[str], Mapping[str, int]]
 
 
-def hit_at_k(ranked_ids: List[str], relevant_ids: set, k: int) -> float:
-    """Alias for ``recall_at_k`` (binary success@k)."""
-    return recall_at_k(ranked_ids, relevant_ids, k)
+def _as_grades(relevant: Relevance) -> Dict[str, int]:
+    """
+    Normalise a relevance argument to ``{pid: grade}``.
+
+    Accepts a plain iterable of relevant ids (every id gets grade 1, the old
+    binary behaviour) or a ``pid -> grade`` mapping from graded qrels. Grades
+    <= 0 are dropped so an explicitly-judged-irrelevant entry never counts as
+    relevant for recall/hit/MRR.
+    """
+    if isinstance(relevant, Mapping):
+        return {str(pid): int(g) for pid, g in relevant.items() if int(g) > 0}
+    return {str(pid): 1 for pid in relevant}
 
 
-def mrr_at_k(ranked_ids: List[str], relevant_ids: set, k: int) -> float:
+def hit_at_k(ranked_ids: Sequence[str], relevant_ids: Relevance, k: int) -> float:
+    """
+    Success@k: 1.0 if *any* relevant passage appears in the top-k, else 0.0.
+
+    Averaged over queries this is the "Hit@k" column. It is NOT recall: with a
+    single gold passage the two coincide, but with multiple gold passages
+    Hit@k saturates at 1.0 while recall does not. Use :func:`recall_at_k` when
+    the paper says recall.
+    """
+    relevant = _as_grades(relevant_ids)
+    if not relevant:
+        return 0.0
+    return 1.0 if any(pid in relevant for pid in ranked_ids[:k]) else 0.0
+
+
+def recall_at_k(ranked_ids: Sequence[str], relevant_ids: Relevance, k: int) -> float:
+    """
+    Recall@k: |top-k retrieved that are relevant| / |all relevant|.
+
+    The denominator is the size of the judgment set passed in. Pass *full*
+    qrels (see :mod:`src.evaluation.qrels`), not the positives that happen to
+    be in the candidate pool -- a pool-relative denominator makes recall@100
+    identically 1.0 whenever the pool is no larger than 100.
+    """
+    relevant = _as_grades(relevant_ids)
+    if not relevant:
+        return 0.0
+    return len(set(ranked_ids[:k]) & relevant.keys()) / len(relevant)
+
+
+def mrr_at_k(ranked_ids: Sequence[str], relevant_ids: Relevance, k: int) -> float:
+    """Reciprocal rank of the first relevant passage within the top-k, else 0."""
+    relevant = _as_grades(relevant_ids)
     for i, rid in enumerate(ranked_ids[:k]):
-        if rid in relevant_ids:
+        if rid in relevant:
             return 1.0 / (i + 1)
     return 0.0
 
 
-def ndcg_at_k(ranked_ids: List[str], relevant_ids: set, k: int) -> float:
+def mrr(ranked_ids: Sequence[str], relevant_ids: Relevance) -> float:
+    """Reciprocal rank over the *untruncated* ranking (no cutoff)."""
+    relevant = _as_grades(relevant_ids)
+    for rank, pid in enumerate(ranked_ids, 1):
+        if pid in relevant:
+            return 1.0 / rank
+    return 0.0
+
+
+def ndcg_at_k(
+    ranked_ids: Sequence[str],
+    relevant_ids: Relevance,
+    k: int,
+    *,
+    gain: str = "linear",
+) -> float:
+    """
+    Graded nDCG@k with linear gain (trec_eval / pytrec_eval ``ndcg_cut``).
+
+        DCG@k  = sum_{i<k} g(rel(ranked_i)) / log2(i + 2)
+        IDCG@k = sum_{i<k} g(rel_sorted_i)  / log2(i + 2)
+        nDCG@k = DCG@k / IDCG@k     (0.0 when IDCG is 0)
+
+    ``rel`` is 0 for any id absent from the judgments, and the ideal ranking is
+    taken over the **full** judgment set -- so on a densely judged collection
+    IDCG@k saturates at k perfect documents and the score is comparable to
+    published numbers. Passing a bare id list reproduces binary gain.
+
+    ``gain="linear"`` uses g(r) = r, matching ``pytrec_eval``'s ``ndcg_cut``
+    and the numbers reported in the paper. ``gain="exp"`` uses g(r) = 2^r - 1
+    (Burges et al.) and is provided only for cross-checking against tools that
+    default to it; the two disagree wherever grades exceed 1.
+    """
+    if gain not in ("linear", "exp"):
+        raise ValueError(f"gain must be 'linear' or 'exp', got {gain!r}")
+    g = (lambda r: float(r)) if gain == "linear" else (lambda r: float(2 ** r - 1))
+
+    grades = _as_grades(relevant_ids)
+    if not grades:
+        return 0.0
+
     dcg = sum(
-        1.0 / math.log2(i + 2)
-        for i, r in enumerate(ranked_ids[:k])
-        if r in relevant_ids
+        g(grades.get(pid, 0)) / math.log2(i + 2)
+        for i, pid in enumerate(ranked_ids[:k])
+        if pid in grades
     )
-    idcg = sum(
-        1.0 / math.log2(i + 2)
-        for i in range(min(len(relevant_ids), k))
-    )
+    ideal = sorted(grades.values(), reverse=True)[:k]
+    idcg = sum(g(r) / math.log2(i + 2) for i, r in enumerate(ideal))
     return dcg / idcg if idcg > 0 else 0.0
-
-
-def evaluate_retrieval(
-    results: List[Dict],
-    cutoffs=(5, 10, 20),
-    by_qtype: bool = True
-) -> Dict:
-
-    metrics = {k: {"recall": [], "mrr": [], "ndcg": []} for k in cutoffs}
-    qtype_metrics = {}
-
-    for item in results:
-        ranked = item["ranked_ids"]
-        relevant = set(item["relevant_ids"])
-        qtype = normalize_question_type(item.get("question_type", "other"))
-
-        if qtype not in qtype_metrics:
-            qtype_metrics[qtype] = {k: {"ndcg": []} for k in cutoffs}
-
-        for k in cutoffs:
-            r = recall_at_k(ranked, relevant, k)
-            m = mrr_at_k(ranked, relevant, k)
-            n = ndcg_at_k(ranked, relevant, k)
-
-            metrics[k]["recall"].append(r)
-            metrics[k]["mrr"].append(m)
-            metrics[k]["ndcg"].append(n)
-            qtype_metrics[qtype][k]["ndcg"].append(n)
-
-    summary = {}
-
-    for k in cutoffs:
-        summary[f"recall@{k}"] = float(np.mean(metrics[k]["recall"]))
-        summary[f"hit@{k}"] = float(np.mean(metrics[k]["recall"]))
-        summary[f"mrr@{k}"] = float(np.mean(metrics[k]["mrr"]))
-        summary[f"ndcg@{k}"] = float(np.mean(metrics[k]["ndcg"]))
-
-    if by_qtype:
-        for qtype, data in qtype_metrics.items():
-            for k in cutoffs:
-                vals = data[k]["ndcg"]
-                summary[f"ndcg@{k}_{qtype}"] = float(np.mean(vals)) if vals else 0.0
-
-    return summary
 
 
 def evaluate_rank_data(
@@ -102,14 +135,31 @@ def evaluate_rank_data(
     query_encoder_device: str = "cpu",
     query_emb_cache_path: Optional[str] = None,
     batch_size: int = 8192,
+    dropped_features: Optional[Sequence[str]] = None,
 ) -> float:
-    """Compute mean nDCG@k over queries from rank JSONL (early stopping)."""
+    """
+    Compute mean nDCG@k over queries from rank JSONL (early stopping).
+
+    Rank JSONL stores the full 8+8 feature schema; the model may consume a
+    subset. ``dropped_features`` must therefore match what the model was
+    trained with -- ``None`` means the schema default. The selected width is
+    checked against the model's branch widths, because scoring a model with
+    silently misaligned columns produces a plausible number that means nothing.
+    """
 
     from collections import defaultdict
 
     model.eval()
+    sparse_cols, dense_cols = active_feature_indices(dropped_features)
+    if (len(sparse_cols), len(dense_cols)) != (int(model.sparse_dim), int(model.dense_dim)):
+        raise ValueError(
+            f"Feature selection does not match the model: dropped_features keeps "
+            f"sparse={len(sparse_cols)} dense={len(dense_cols)}, but the model "
+            f"expects sparse={model.sparse_dim} dense={model.dense_dim}. Pass the "
+            "same model.dropped_features the checkpoint was trained with."
+        )
     query_scores: Dict[str, List] = defaultdict(list)
-    query_emb_cache: Dict[str, List[float]] = {}
+    query_emb_cache = QueryEmbStore.empty(int(model.query_feat_dim))
     query_encoder = None
 
     if query_emb_cache_path:
@@ -123,25 +173,26 @@ def evaluate_rank_data(
             if all_cache.exists():
                 p = all_cache
         if p.exists():
-            loaded = load_query_emb_cache(p)
-            if loaded:
+            loaded = load_query_emb_store(p, expected_dim=int(model.query_feat_dim))
+            if len(loaded):
                 query_emb_cache = loaded
                 logger.info(
                     f"Loaded query_emb cache for evaluation: {len(query_emb_cache):,} queries"
                 )
 
     def _model_query_dim(rec: Dict) -> int:
-        qtype_dim = len(rec.get("qtype_onehot", []))
-        in_features = model.controller.net[0].in_features
-        return int(in_features) - int(qtype_dim)
+        """Query-embedding width the controller expects (independent of the one-hot)."""
+        del rec  # kept for call-site symmetry; the model is authoritative
+        return int(model.query_feat_dim)
 
-    def _resolve_query_emb(rec: Dict) -> List[float]:
+    def _resolve_query_emb(rec: Dict):
         q = rec.get("query_emb")
         if isinstance(q, list):
             return q
         qid = str(rec.get("qid", ""))
-        if qid in query_emb_cache:
-            return query_emb_cache[qid]
+        cached = query_emb_cache.get(qid)
+        if cached is not None:
+            return cached
         question = rec.get("question")
         if not isinstance(question, str) or not question.strip():
             raise KeyError(
@@ -165,71 +216,83 @@ def evaluate_rank_data(
             raise ValueError(
                 f"Computed query_emb dim mismatch: got={len(emb)} expected={expected}"
             )
-        query_emb_cache[qid] = emb
-        return emb
+        return query_emb_cache.set(qid, emb)
 
-    eval_batch_size = max(1, int(batch_size))
-    batch_sparse: List[List[float]] = []
-    batch_dense: List[List[float]] = []
-    batch_qemb: List[List[float]] = []
-    batch_qtype: List[List[float]] = []
-    batch_meta: List[tuple] = []
-    text_only = bool(getattr(model, "text_only", True))
-    batch_kg: List[List[float]] = []
-    batch_cov: List[float] = []
+    # Grouped by query, not streamed flat. Two reasons: the model may
+    # standardise each branch within its pool (``normalize_branches``), which is
+    # only defined per query; and the controller may consume pool features,
+    # which describe the whole pool. ``batch_size`` is now a cap on QUERIES per
+    # forward, and pools are padded to the batch maximum with a mask.
+    from src.features.pool_features import pool_features_from_records
 
-    def _flush_batch() -> None:
-        if not batch_meta:
-            return
-        sparse_t = torch.tensor(batch_sparse, dtype=torch.float32, device=device)
-        dense_t = torch.tensor(batch_dense, dtype=torch.float32, device=device)
-        qemb_t = torch.tensor(batch_qemb, dtype=torch.float32, device=device)
-        qtype_t = torch.tensor(batch_qtype, dtype=torch.float32, device=device)
-        kwargs = {
-            "sparse_feats": sparse_t,
-            "dense_feats": dense_t,
-            "query_emb": qemb_t,
-            "qtype_onehot": qtype_t,
-            "ablation": ablation,
-        }
-        if not text_only:
-            kwargs["kg_feats"] = torch.tensor(batch_kg, dtype=torch.float32, device=device)
-            kwargs["kg_coverage"] = torch.tensor(batch_cov, dtype=torch.float32, device=device)
-        out = model(**kwargs)
-        scores = out[0] if isinstance(out, (tuple, list)) else out
-        for score, (qid, pid, label) in zip(scores.detach().float().cpu().tolist(), batch_meta):
-            query_scores[qid].append((float(score), pid, label))
-        batch_sparse.clear()
-        batch_dense.clear()
-        batch_qemb.clear()
-        batch_qtype.clear()
-        batch_meta.clear()
-        if not text_only:
-            batch_kg.clear()
-            batch_cov.clear()
-
-    with torch.no_grad(), open(dev_path, "r", encoding="utf-8", errors="ignore") as f:
+    records_by_qid: Dict[str, List[Dict]] = defaultdict(list)
+    with open(dev_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             if not line.strip():
                 continue
-
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            records_by_qid[rec["qid"]].append(rec)
 
-            q_emb = _resolve_query_emb(rec)
-            batch_sparse.append(rec["sparse_feats"])
-            batch_dense.append(rec["dense_feats"])
-            if not text_only:
-                batch_kg.append(rec.get("kg_feats", []))
-                batch_cov.append(float(rec.get("kg_coverage", 0.0)))
-            batch_qemb.append(q_emb)
-            batch_qtype.append(rec["qtype_onehot"])
-            batch_meta.append((rec["qid"], rec["pid"], rec["label"]))
-            if len(batch_meta) >= eval_batch_size:
-                _flush_batch()
-        _flush_batch()
+    # Pools are capped at ~100 candidates, so a few hundred queries per forward
+    # keeps the GPU busy without a large padded tensor.
+    queries_per_batch = max(1, int(batch_size) // 128)
+    qids = list(records_by_qid)
+
+    with torch.no_grad():
+        for start in range(0, len(qids), queries_per_batch):
+            chunk = qids[start : start + queries_per_batch]
+            pools = [records_by_qid[q] for q in chunk]
+            n_max = max(len(p) for p in pools)
+            b = len(pools)
+
+            sparse = np.zeros((b, n_max, len(sparse_cols)), dtype=np.float32)
+            dense = np.zeros((b, n_max, len(dense_cols)), dtype=np.float32)
+            mask = np.zeros((b, n_max), dtype=np.float32)
+            qemb = np.zeros((b, int(model.query_feat_dim)), dtype=np.float32)
+            pfeats = np.zeros((b, int(model.pool_feat_dim)), dtype=np.float32)
+
+            for i, pool in enumerate(pools):
+                n = len(pool)
+                sparse[i, :n] = np.asarray(
+                    [r["sparse_feats"] for r in pool], dtype=np.float32
+                )[:, sparse_cols]
+                dense[i, :n] = np.asarray(
+                    [r["dense_feats"] for r in pool], dtype=np.float32
+                )[:, dense_cols]
+                mask[i, :n] = 1.0
+                qemb[i] = np.asarray(_resolve_query_emb(pool[0]), dtype=np.float32)
+                pfeats[i] = pool_features_from_records(pool)
+
+            out = model(
+                sparse_feats=torch.from_numpy(sparse).to(device),
+                dense_feats=torch.from_numpy(dense).to(device),
+                query_emb=torch.from_numpy(qemb).to(device),
+                pool_feats=torch.from_numpy(pfeats).to(device),
+                mask=torch.from_numpy(mask).to(device),
+                ablation=ablation,
+            )
+            scores = out[0] if isinstance(out, (tuple, list)) else out
+            scores = scores.detach().float().cpu().numpy()
+
+            for i, (qid, pool) in enumerate(zip(chunk, pools)):
+                for j, rec in enumerate(pool):
+                    query_scores[qid].append(
+                        (float(scores[i, j]), rec["pid"], rec["label"])
+                    )
+
+    # Score against full graded qrels where they exist. Falling back to in-pool
+    # positives makes the denominator pool-relative, which flatters the metric
+    # and is not comparable across pool sizes; the fallback is kept only for
+    # collections with no qrels source on disk.
+    from src.evaluation.qrels import qrels_for_qids
+
+    try:
+        qrels = qrels_for_qids(query_scores.keys())
+    except (OSError, ValueError):
+        qrels = {}
 
     ndcgs = []
 
@@ -240,7 +303,7 @@ def evaluate_rank_data(
         scored.sort(key=lambda x: x[0], reverse=True)
 
         ranked = [pid for _, pid, _ in scored]
-        relevant = {pid for _, pid, lbl in scored if lbl == 1}
+        relevant = qrels.get(str(qid)) or {pid for _, pid, lbl in scored if int(lbl) >= 1}
 
         ndcgs.append(ndcg_at_k(ranked, relevant, k))
 

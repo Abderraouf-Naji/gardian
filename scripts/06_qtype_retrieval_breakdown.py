@@ -30,11 +30,11 @@ from tqdm import tqdm
 sys.path.insert(0, ".")
 
 from src.common.question_types import (
-    ORDERED_QUESTION_TYPES,
     assert_cfg_question_types,
     normalize_question_type,
 )
 from src.common.rank_data_paths import resolve_rank_data_file
+from src.evaluation.metrics import mrr, ndcg_at_k, recall_at_k
 from src.evaluation.stats import bootstrap_mean_ci
 from src.model.gardian import GARDIAN, build_gardian_from_model_cfg
 
@@ -68,44 +68,16 @@ def build_model(cfg, device: str, retriever: str) -> GARDIAN:
     return model
 
 
-def compute_mrr(ranked_ids: List[str], relevant_ids: List[str]) -> float:
-    for rank, pid in enumerate(ranked_ids, 1):
-        if pid in relevant_ids:
-            return 1.0 / rank
-    return 0.0
-
-
-def compute_ndcg(ranked_ids: List[str], relevant_ids: List[str], k: int) -> float:
-    if not relevant_ids:
-        return 0.0
-    dcg = 0.0
-    for i, pid in enumerate(ranked_ids[:k]):
-        if pid in relevant_ids:
-            dcg += 1.0 / np.log2(i + 2)
-    idcg = 0.0
-    for i in range(min(len(relevant_ids), k)):
-        idcg += 1.0 / np.log2(i + 2)
-    return dcg / idcg if idcg > 0 else 0.0
-
-
-def compute_recall(ranked_ids: List[str], relevant_ids: List[str], k: int) -> float:
-    if not relevant_ids:
-        return 0.0
-    retrieved_at_k = set(ranked_ids[:k])
-    relevant_set = set(relevant_ids)
-    return len(retrieved_at_k & relevant_set) / len(relevant_set)
+# Metric primitives are shared with src/evaluation/rank_jsonl_eval.py so the
+# per-question-type breakdown cannot drift from the headline table.
+compute_mrr = mrr
+compute_ndcg = ndcg_at_k
+compute_recall = recall_at_k
 
 
 def resolve_question_type(rec: Dict[str, Any]) -> str:
-    qt = rec.get("question_type")
-    if isinstance(qt, str) and qt.strip():
-        return normalize_question_type(qt)
-    oh = rec.get("qtype_onehot") or []
-    if oh:
-        idx = int(np.argmax(np.asarray(oh, dtype=np.float64)))
-        if 0 <= idx < len(ORDERED_QUESTION_TYPES):
-            return ORDERED_QUESTION_TYPES[idx]
-    return "other"
+    """Reporting label for one rank record, from the question_type field alone."""
+    return normalize_question_type(rec.get("question_type"))
 
 
 def group_rank_records(
@@ -136,10 +108,7 @@ def group_rank_records(
             gardian_bundles[qid] = {
                 "sparse_feats": [],
                 "dense_feats": [],
-                "kg_feats": [],
                 "query_emb": None,
-                "qtype_onehot": None,
-                "kg_coverage": None,
                 "candidates": [],
                 "question_type": qtype,
             }
@@ -153,11 +122,8 @@ def group_rank_records(
         g["candidates"].append({"pid": rec["pid"], "label": rec["label"]})
         g["sparse_feats"].append(torch.tensor(rec["sparse_feats"], dtype=torch.float32))
         g["dense_feats"].append(torch.tensor(rec["dense_feats"], dtype=torch.float32))
-        g["kg_feats"].append(torch.tensor(rec["kg_feats"], dtype=torch.float32))
         if g["query_emb"] is None:
             g["query_emb"] = torch.tensor(rec["query_emb"], dtype=torch.float32)
-            g["qtype_onehot"] = torch.tensor(rec["qtype_onehot"], dtype=torch.float32)
-            g["kg_coverage"] = rec["kg_coverage"]
 
     return queries, gardian_bundles
 
@@ -209,17 +175,11 @@ def score_gardian_per_query(
             batch_size = len(qdata["candidates"])
             sparse_batch = torch.stack(qdata["sparse_feats"]).to(device)
             dense_batch = torch.stack(qdata["dense_feats"]).to(device)
-            kg_batch = torch.stack(qdata["kg_feats"]).to(device)
             query_emb = qdata["query_emb"].unsqueeze(0).expand(batch_size, -1).to(device)
-            qtype_onehot = qdata["qtype_onehot"].unsqueeze(0).expand(batch_size, -1).to(device)
-            kg_coverage = torch.full((batch_size,), qdata["kg_coverage"], dtype=torch.float32).to(device)
             scores, _ = model(
                 sparse_feats=sparse_batch,
                 dense_feats=dense_batch,
-                kg_feats=kg_batch,
                 query_emb=query_emb,
-                qtype_onehot=qtype_onehot,
-                kg_coverage=kg_coverage,
             )
             sc = scores.cpu().numpy().flatten()
             sorted_indices = np.argsort(sc)[::-1]
@@ -262,18 +222,18 @@ def print_breakdown_table(
         line_parts = [f"{qtype:<22}"]
         n = 0
         vals_ndcg: Dict[str, float] = {}
-        for sys in systems:
-            rows = system_rows.get(sys, [])
+        for system in systems:
+            rows = system_rows.get(system, [])
             sub = [m for _, qt, m in rows if qt == qtype]
             if not sub:
-                vals_ndcg[sys] = 0.0
+                vals_ndcg[system] = 0.0
                 continue
             n = len(sub)
-            vals_ndcg[sys] = float(np.mean([m[ndcg_key] for m in sub]))
+            vals_ndcg[system] = float(np.mean([m[ndcg_key] for m in sub]))
         line_parts.append(f"n={n:<6}")
 
-        for sys in systems:
-            line_parts.append(f"{sys:>8}:{vals_ndcg[sys]:.4f}")
+        for system in systems:
+            line_parts.append(f"{system:>8}:{vals_ndcg[system]:.4f}")
 
         g, d, h = vals_ndcg.get("gardian", 0), vals_ndcg.get("dense", 0), vals_ndcg.get("hybrid", 0)
         delta_d = (g - d) * 100
@@ -286,9 +246,9 @@ def print_breakdown_table(
     over_bits = ["overall".ljust(22)]
     n_tot = len(system_rows.get("dense", []))
     over_bits.append(f"n={n_tot:<6}")
-    for sys in systems:
-        om = overall_mean(system_rows.get(sys, []))
-        over_bits.append(f"{sys:>8}:{om.get(ndcg_key, 0.0):.4f}")
+    for system in systems:
+        om = overall_mean(system_rows.get(system, []))
+        over_bits.append(f"{system:>8}:{om.get(ndcg_key, 0.0):.4f}")
     om_g = overall_mean(system_rows.get("gardian", []))
     om_d = overall_mean(system_rows.get("dense", []))
     om_h = overall_mean(system_rows.get("hybrid", []))
@@ -316,13 +276,13 @@ def build_json_payload(
 
     for qtype in sorted(qtypes):
         block: Dict[str, Any] = {"n_queries": 0, "systems": {}}
-        for sys in systems:
-            rows = [(qid, m) for qid, qt, m in system_rows.get(sys, []) if qt == qtype]
+        for system in systems:
+            rows = [(qid, m) for qid, qt, m in system_rows.get(system, []) if qt == qtype]
             if not rows:
                 continue
             block["n_queries"] = len(rows)
             ms = [m for _, m in rows]
-            block["systems"][sys] = {
+            block["systems"][system] = {
                 ndcg_key: float(np.mean([m[ndcg_key] for m in ms])),
                 recall_key: float(np.mean([m[recall_key] for m in ms])),
                 "mrr": float(np.mean([m["mrr"] for m in ms])),
@@ -337,10 +297,10 @@ def build_json_payload(
         out["by_question_type"][qtype] = block
 
     out["overall"] = {}
-    for sys in systems:
-        om = overall_mean(system_rows.get(sys, []))
+    for system in systems:
+        om = overall_mean(system_rows.get(system, []))
         if om:
-            out["overall"][sys] = om
+            out["overall"][system] = om
     return out
 
 
@@ -395,7 +355,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = OmegaConf.load("configs/base.yaml")
-    assert_cfg_question_types(cfg.model.question_types)
+    assert_cfg_question_types(cfg.evaluation.question_types)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Device: {device}")
 

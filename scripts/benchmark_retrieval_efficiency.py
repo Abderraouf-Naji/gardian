@@ -31,7 +31,6 @@ from sentence_transformers import SentenceTransformer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.common.hybrid_retrievers import FOCUS_HYBRID_RETRIEVERS
-from src.common.question_types import normalize_question_type, qtype_onehot
 from src.evaluation.index_stats import report_all_index_sizes
 from src.model.gardian import build_gardian_from_model_cfg, load_checkpoint_state
 from src.pipeline.gardian_adaptive import retrieve_adaptive_candidates_live
@@ -145,8 +144,7 @@ def benchmark_one_setting(
                     hybrid,
                     gardian,
                     query_emb=q_emb,
-                    qtype_onehot=q_oh,
-                    cfg=cfg,
+                            cfg=cfg,
                     device=device,
                 )
 
@@ -159,7 +157,6 @@ def benchmark_one_setting(
         q_emb = q_oh = None
         if encoder is not None:
             q_emb = encoder.encode([q], normalize_embeddings=True, convert_to_numpy=True)[0].tolist()
-            q_oh = qtype_onehot(normalize_question_type(item.get("question_type") or "other"))
         _run_all(q, q_emb, q_oh)
 
     sparse_ms.clear()
@@ -174,7 +171,6 @@ def benchmark_one_setting(
         q_emb = q_oh = None
         if encoder is not None:
             q_emb = encoder.encode([q], normalize_embeddings=True, convert_to_numpy=True)[0].tolist()
-            q_oh = qtype_onehot(normalize_question_type(item.get("question_type") or "other"))
         _run_all(q, q_emb, q_oh)
 
     out: Dict[str, Any] = {

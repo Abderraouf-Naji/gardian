@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from loguru import logger
 
 from src.pipeline.rag.context import format_passages
 from src.pipeline.rag.generation import format_chat_prompt, generate_text
-from src.pipeline.rag.parser import parse_answer, validate_answer, yesno_fallback_with_citation
+from src.pipeline.rag.parser import parse_answer, yesno_fallback_with_citation
 from src.pipeline.rag.prompts import build_prompt, build_retry_prompt
 from src.pipeline.rag.reader_types import ParsedAnswer, ReaderConfig, ReaderTask
 
@@ -92,6 +91,7 @@ class RAGReader:
             question=question,
             context=context,
             routing_note=routing_note,
+            yesno_prompt=self.config.yesno_prompt,
         )
         prompt = format_chat_prompt(self.tokenizer, self.reader_model, sys_p, usr_p)
         raw = generate_text(

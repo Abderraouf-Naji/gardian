@@ -24,5 +24,4 @@ def test_ndcg_partial():
 def test_ndcg_empty_relevant():
     ranked = ["a", "b"]
     relevant = set()
-    idcg = 0.0
     assert ndcg_at_k(ranked, relevant, 5) == 0.0

@@ -1,0 +1,97 @@
+{
+  "retriever": "hybrid_bm25_medcpt",
+  "k": 10,
+  "datasets": {
+    "pubmedqa_labeled/eval": {
+      "n_test_queries": 1000,
+      "fit_on": "pubmedqa_artificial/dev",
+      "global_alpha_sparse": 0.05,
+      "dev_ndcg_at_global_alpha": 0.791294387601739,
+      "group_alphas": {
+        "__global__": 0.05,
+        "yesno": 0.05
+      },
+      "group_alpha_is_degenerate": true,
+      "pool_recall": 1.0,
+      "results_gold_in_pool": {
+        "Sum (unnormalised)": 0.915134454113392,
+        "RRF": 0.8829260942783644,
+        "Global-alpha": 0.9234604019724287,
+        "Group-alpha": 0.9234604019724287,
+        "Oracle-alpha (upper bound)": 0.9456137464954791
+      },
+      "oracle_rerank_ndcg": 1.0,
+      "oracle_alpha_tie_fraction": 0.5340891089108911,
+      "oracle_alpha_invariant_fraction": 0.288,
+      "results": {
+        "Sum (unnormalised)": 0.915134454113392,
+        "RRF": 0.8829260942783644,
+        "Global-alpha": 0.9234604019724287,
+        "Group-alpha": 0.9234604019724287,
+        "Oracle-alpha (upper bound)": 0.9456137464954791
+      }
+    },
+    "pubmedqa_artificial/test": {
+      "n_test_queries": 18162,
+      "fit_on": "pubmedqa_artificial/dev",
+      "global_alpha_sparse": 0.05,
+      "dev_ndcg_at_global_alpha": 0.791294387601739,
+      "group_alphas": {
+        "__global__": 0.05,
+        "yesno": 0.05
+      },
+      "group_alpha_is_degenerate": true,
+      "pool_recall": 0.9969261170271161,
+      "results_gold_in_pool": {
+        "Sum (unnormalised)": 0.7651481407597893,
+        "RRF": 0.7619720219571579,
+        "Global-alpha": 0.7910668143228734,
+        "Group-alpha": 0.7910668143228734,
+        "Oracle-alpha (upper bound)": 0.8518690450057994
+      },
+      "oracle_rerank_ndcg": 0.9969261170271161,
+      "oracle_alpha_tie_fraction": 0.4081048342693536,
+      "oracle_alpha_invariant_fraction": 0.15152516242704547,
+      "results": {
+        "Sum (unnormalised)": 0.762796164918174,
+        "RRF": 0.7596298091330498,
+        "Global-alpha": 0.7886351675119126,
+        "Group-alpha": 0.7886351675119126,
+        "Oracle-alpha (upper bound)": 0.8492504992532292
+      }
+    },
+    "medmcqa/test": {
+      "n_test_queries": 4284,
+      "fit_on": "medmcqa/dev",
+      "global_alpha_sparse": 0.54,
+      "dev_ndcg_at_global_alpha": 0.4714702320028813,
+      "group_alphas": {
+        "__global__": 0.54,
+        "diagnosis": 0.76,
+        "factoid": 0.13,
+        "treatment": 0.08,
+        "mechanism": 0.78,
+        "contraindication": 0.71
+      },
+      "group_alpha_is_degenerate": false,
+      "pool_recall": 0.8409893992932862,
+      "results_gold_in_pool": {
+        "Sum (unnormalised)": 0.4774834300276936,
+        "RRF": 0.47681138199970846,
+        "Global-alpha": 0.4728593308437032,
+        "Group-alpha": 0.47632899131886935,
+        "Oracle-alpha (upper bound)": 0.6084375606270174
+      },
+      "oracle_rerank_ndcg": 0.8409893992932862,
+      "oracle_alpha_tie_fraction": 0.5765084911852529,
+      "oracle_alpha_invariant_fraction": 0.2887488328664799,
+      "results": {
+        "Sum (unnormalised)": 0.40155850299148793,
+        "RRF": 0.4009933177241364,
+        "Global-alpha": 0.39766968459647123,
+        "Group-alpha": 0.4005876322752329,
+        "Oracle-alpha (upper bound)": 0.5116895386191878
+      }
+    }
+  }
+}

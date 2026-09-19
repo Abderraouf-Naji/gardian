@@ -1,0 +1,14 @@
+{
+  "retriever": "hybrid_bm25_faiss",
+  "seed": 87,
+  "created_utc": "2026-09-17T18:36:27.120003+00:00",
+  "best_ndcg10": 0.7100160020134186,
+  "epochs_completed": 10,
+  "trainable_parameters": 7928836,
+  "train_wall_clock_sec": 6282.554909944534,
+  "train_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_train_all.jsonl",
+  "dev_path": "data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_dev_all.jsonl",
+  "query_emb_cache_path": "data/query_emb_cache_hybrid_bm25_faiss_train_all.pkl",
+  "epoch_logs_jsonl": "results/seeds/seed_87/gardian_training/hybrid_bm25_faiss/epoch_logs.jsonl",
+  "epoch_logs_csv": "results/seeds/seed_87/gardian_training/hybrid_bm25_faiss/epoch_logs.csv"
+}

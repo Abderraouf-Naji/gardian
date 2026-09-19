@@ -9,7 +9,6 @@ Features (paper Eq. 4):
 """
 
 import numpy as np
-from typing import List
 
 
 def compute_dense_features(q_emb: np.ndarray, p_emb: np.ndarray,
