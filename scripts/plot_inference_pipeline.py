@@ -40,6 +40,7 @@ def main() -> None:
 
     cfg = OmegaConf.load(args.cfg)
     H = int(cfg.model.branch_hidden)
+    M = max(H // 2, 4)  # second hidden layer, as in src/model/gardian.py
     QD = int(cfg.model.query_feat_dim)
     KP = int(cfg.retrieval.candidate_pool_size)
     KC = int(cfg.retrieval.top_k_bm25)
@@ -77,10 +78,10 @@ def main() -> None:
     rect(ax, bx + 0.012, Y - 0.010, 0.070, 0.115,
          f"dense\n$\\mathbb{{R}}^{{{DENSE_FEAT_DIM}}}$", fs=5.6)
     rect(ax, bx + 0.096, Y + 0.135, 0.078, 0.115,
-         f"$f_{{sp}}$\n{SPARSE_FEAT_DIM}$\\to${H}$\\to$1", fs=5.4)
+         f"$f_{{sp}}$\n${SPARSE_FEAT_DIM}\\!\\to\\!{H}\\!\\to\\!{M}\\!\\to\\!1$", fs=4.6)
     flame(ax, bx + 0.166, Y + 0.232)
     rect(ax, bx + 0.096, Y - 0.010, 0.078, 0.115,
-         f"$f_{{de}}$\n{DENSE_FEAT_DIM}$\\to${H}$\\to$1", fs=5.4)
+         f"$f_{{de}}$\n${DENSE_FEAT_DIM}\\!\\to\\!{H}\\!\\to\\!{M}\\!\\to\\!1$", fs=4.6)
     flame(ax, bx + 0.166, Y + 0.087)
     arrow(ax, (bx + 0.082, Y + 0.192), (bx + 0.096, Y + 0.192))
     arrow(ax, (bx + 0.082, Y + 0.048), (bx + 0.096, Y + 0.048))
@@ -94,7 +95,7 @@ def main() -> None:
          f"$h_q\\!\\in\\!\\mathbb{{R}}^{{{QD}}}$\nmean-pooled", fs=5.2)
     snowflake(ax, bx + 0.074, Y - 0.058)
     rect(ax, bx + 0.096, Y - 0.155, 0.078, 0.115,
-         f"controller\n{QD}$\\to${H}$\\to$2", fs=5.4)
+         f"controller\n${QD}\\!\\to\\!{H}\\!\\to\\!{M}\\!\\to\\!2$", fs=4.6)
     flame(ax, bx + 0.166, Y - 0.058)
     arrow(ax, (bx + 0.082, Y - 0.098), (bx + 0.096, Y - 0.098), color=ACCENT)
     elbow(ax, [(0.038, Y + 0.088), (0.038, Y - 0.098), (bx + 0.012, Y - 0.098)],

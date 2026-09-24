@@ -1,0 +1,199 @@
+{
+  "meta": {
+    "created_utc": "2026-09-20T14:01:13.794773+00:00",
+    "script": "scripts/benchmark_train_step.py",
+    "device": "cuda",
+    "gpu_name": "NVIDIA A40",
+    "steps_per_repeat": 200,
+    "repeats": 10,
+    "batch_size_queries": 64,
+    "listwise_group_size": 64,
+    "objective": "lambdarank",
+    "precision": "mixed fp16 (autocast + GradScaler)",
+    "gpu_contention": {
+      "other_processes": 1
+    },
+    "note": "Both arms are timed in one process on identical batches and interleaved across repeats, so GPU load applies equally to both and cancels in the ratio. Data loading is excluded: it is shared by both arms and dominates a real epoch."
+  },
+  "with_controller": {
+    "p50_ms_per_step_mean": 21.675386049901135,
+    "p50_ms_per_step_min": 20.275646005757153,
+    "trainable_parameters": 7928836
+  },
+  "no_controller": {
+    "p50_ms_per_step_mean": 19.94804015266709,
+    "p50_ms_per_step_min": 18.660763540538028,
+    "trainable_parameters": 4247554
+  },
+  "controller_step_overhead": {
+    "ratio": 1.0865389276119923,
+    "percent_slower_with_controller": 8.653892761199234,
+    "absolute_ms_per_step": 1.6148824652191252
+  },
+  "raw": {
+    "with_controller": [
+      {
+        "use_controller": true,
+        "trainable_parameters": 7928836,
+        "steps": 200,
+        "mean_ms_per_step": 20.684414658753667,
+        "p50_ms_per_step": 20.275646005757153,
+        "std_ms_per_step": 1.3574321203020308
+      },
+      {
+        "use_controller": true,
+        "trainable_parameters": 7928836,
+        "steps": 200,
+        "mean_ms_per_step": 21.49356487992918,
+        "p50_ms_per_step": 21.923865977441892,
+        "std_ms_per_step": 1.8363074624194433
+      },
+      {
+        "use_controller": true,
+        "trainable_parameters": 7928836,
+        "steps": 200,
+        "mean_ms_per_step": 21.490984627162106,
+        "p50_ms_per_step": 21.90810049069114,
+        "std_ms_per_step": 2.4604969064506412
+      },
+      {
+        "use_controller": true,
+        "trainable_parameters": 7928836,
+        "steps": 200,
+        "mean_ms_per_step": 20.78389643400442,
+        "p50_ms_per_step": 22.11090549826622,
+        "std_ms_per_step": 2.5538037228593677
+      },
+      {
+        "use_controller": true,
+        "trainable_parameters": 7928836,
+        "steps": 200,
+        "mean_ms_per_step": 21.384631862165406,
+        "p50_ms_per_step": 21.915966528467834,
+        "std_ms_per_step": 1.7428392910216264
+      },
+      {
+        "use_controller": true,
+        "trainable_parameters": 7928836,
+        "steps": 200,
+        "mean_ms_per_step": 21.664576269395184,
+        "p50_ms_per_step": 21.955363015877083,
+        "std_ms_per_step": 1.9507287509633762
+      },
+      {
+        "use_controller": true,
+        "trainable_parameters": 7928836,
+        "steps": 200,
+        "mean_ms_per_step": 20.9893160010688,
+        "p50_ms_per_step": 21.271877019898966,
+        "std_ms_per_step": 1.3254639715533318
+      },
+      {
+        "use_controller": true,
+        "trainable_parameters": 7928836,
+        "steps": 200,
+        "mean_ms_per_step": 21.040734215348493,
+        "p50_ms_per_step": 21.61211898783222,
+        "std_ms_per_step": 1.6135252340021484
+      },
+      {
+        "use_controller": true,
+        "trainable_parameters": 7928836,
+        "steps": 200,
+        "mean_ms_per_step": 21.34601408819435,
+        "p50_ms_per_step": 21.887231996515766,
+        "std_ms_per_step": 2.475455995589858
+      },
+      {
+        "use_controller": true,
+        "trainable_parameters": 7928836,
+        "steps": 200,
+        "mean_ms_per_step": 20.793070331565104,
+        "p50_ms_per_step": 21.89278497826308,
+        "std_ms_per_step": 2.506106168183509
+      }
+    ],
+    "no_controller": [
+      {
+        "use_controller": false,
+        "trainable_parameters": 4247554,
+        "steps": 200,
+        "mean_ms_per_step": 19.62269914249191,
+        "p50_ms_per_step": 21.10462947166525,
+        "std_ms_per_step": 2.509201526848588
+      },
+      {
+        "use_controller": false,
+        "trainable_parameters": 4247554,
+        "steps": 200,
+        "mean_ms_per_step": 19.56739068875322,
+        "p50_ms_per_step": 21.082413499243557,
+        "std_ms_per_step": 1.8547217830877158
+      },
+      {
+        "use_controller": false,
+        "trainable_parameters": 4247554,
+        "steps": 200,
+        "mean_ms_per_step": 18.07766257901676,
+        "p50_ms_per_step": 18.71031551854685,
+        "std_ms_per_step": 1.553686833144363
+      },
+      {
+        "use_controller": false,
+        "trainable_parameters": 4247554,
+        "steps": 200,
+        "mean_ms_per_step": 17.742622770019807,
+        "p50_ms_per_step": 18.711655488004908,
+        "std_ms_per_step": 2.6456835942883923
+      },
+      {
+        "use_controller": false,
+        "trainable_parameters": 4247554,
+        "steps": 200,
+        "mean_ms_per_step": 19.8429700685665,
+        "p50_ms_per_step": 21.15718598361127,
+        "std_ms_per_step": 1.6899296807672937
+      },
+      {
+        "use_controller": false,
+        "trainable_parameters": 4247554,
+        "steps": 200,
+        "mean_ms_per_step": 19.22242103377357,
+        "p50_ms_per_step": 18.80361049552448,
+        "std_ms_per_step": 1.7487333673067276
+      },
+      {
+        "use_controller": false,
+        "trainable_parameters": 4247554,
+        "steps": 200,
+        "mean_ms_per_step": 18.560731455509085,
+        "p50_ms_per_step": 19.055298529565334,
+        "std_ms_per_step": 3.1154491134815605
+      },
+      {
+        "use_controller": false,
+        "trainable_parameters": 4247554,
+        "steps": 200,
+        "mean_ms_per_step": 17.11512670124648,
+        "p50_ms_per_step": 18.660763540538028,
+        "std_ms_per_step": 3.8096488936224815
+      },
+      {
+        "use_controller": false,
+        "trainable_parameters": 4247554,
+        "steps": 200,
+        "mean_ms_per_step": 19.859919211594388,
+        "p50_ms_per_step": 21.05386002222076,
+        "std_ms_per_step": 1.8502769335176807
+      },
+      {
+        "use_controller": false,
+        "trainable_parameters": 4247554,
+        "steps": 200,
+        "mean_ms_per_step": 20.03277471725596,
+        "p50_ms_per_step": 21.140668977750465,
+        "std_ms_per_step": 1.913980137964244
+      }
+    ]
+  }
+}

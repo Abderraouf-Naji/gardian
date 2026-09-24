@@ -1,0 +1,464 @@
+{
+  "meta": {
+    "created_utc": "2026-09-20T18:33:43.469331+00:00",
+    "script": "scripts/14_compare_rerankers.py",
+    "retriever": "hybrid_spladepp_medcpt",
+    "device": "cuda",
+    "systems": [
+      "hybrid",
+      "rrf",
+      "cross_encoder_msmarco_minilm",
+      "cross_encoder_bge_v2_m3",
+      "cross_encoder_monot5_med",
+      "cross_encoder_monobert",
+      "gardian"
+    ],
+    "cross_encoder_variants": [
+      {
+        "tag": "msmarco_minilm",
+        "model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "backend": "st",
+        "result_key": "cross_encoder_msmarco_minilm"
+      },
+      {
+        "tag": "bge_v2_m3",
+        "model": "BAAI/bge-reranker-v2-m3",
+        "backend": "st",
+        "result_key": "cross_encoder_bge_v2_m3"
+      },
+      {
+        "tag": "monot5_med",
+        "model": "castorini/monot5-base-med-msmarco",
+        "backend": "monot5",
+        "result_key": "cross_encoder_monot5_med"
+      },
+      {
+        "tag": "monobert",
+        "model": "castorini/monobert-large-msmarco",
+        "backend": "monobert",
+        "result_key": "cross_encoder_monobert"
+      }
+    ],
+    "datasets": [
+      "pubmedqa_labeled",
+      "medmcqa"
+    ],
+    "max_queries": null,
+    "seed": 42,
+    "latency_measured": true,
+    "latency_queries": 120,
+    "latency_warmup": 10,
+    "latency_gpu_contention": {
+      "available": true,
+      "total_processes": 3,
+      "other_processes": 2,
+      "exclusive": false
+    },
+    "gpu_name": "NVIDIA A40",
+    "torch_version": "2.6.0+cu124",
+    "args": {
+      "retriever": "hybrid_spladepp_medcpt",
+      "datasets": "pubmedqa_labeled,medmcqa",
+      "device": "auto",
+      "output": "results/reranker_comparison_hybrid_spladepp_medcpt.json",
+      "skip_backfill": false,
+      "overwrite_ce": false,
+      "fast": false,
+      "eval_only": true,
+      "ce_tags": null,
+      "max_queries": null,
+      "gardian_results_dir": null,
+      "no_cross_encoders": false,
+      "seed": 42,
+      "measure_latency": true,
+      "latency_queries": 120,
+      "latency_ce_batch": 0,
+      "latency_warmup": 10,
+      "cfg": "configs/base.yaml"
+    }
+  },
+  "results": {
+    "pubmedqa_labeled": {
+      "hybrid": {
+        "metrics": {
+          "ndcg@10": 0.913684133074677,
+          "ndcg@20": 0.9299369379577604,
+          "ndcg@50": 0.9386695857020161,
+          "mrr": 0.9916183473389356,
+          "recall@10": 0.9197071428571428,
+          "recall@20": 0.9634357142857143,
+          "hit@10": 0.999
+        },
+        "latency_ms": {
+          "mean_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "p99_ms": 0.0,
+          "std_ms": 0.0,
+          "min_ms": 0.0,
+          "max_ms": 0.0,
+          "n": 120,
+          "note": "first-stage order, no re-ranking step"
+        }
+      },
+      "rrf": {
+        "metrics": {
+          "ndcg@10": 0.9035026431427061,
+          "ndcg@20": 0.9215802163852513,
+          "ndcg@50": 0.9297744117990949,
+          "mrr": 0.9877694444444444,
+          "recall@10": 0.9146738095238095,
+          "recall@20": 0.963452380952381,
+          "hit@10": 0.999
+        },
+        "latency_ms": {
+          "mean_ms": 0.06287523852237924,
+          "p50_ms": 0.059014506405219436,
+          "p95_ms": 0.09161312482319772,
+          "p99_ms": 0.10141674487385897,
+          "std_ms": 0.011141350286427832,
+          "min_ms": 0.05445198621600866,
+          "max_ms": 0.10306300828233361,
+          "n": 110
+        }
+      },
+      "gardian": {
+        "metrics": {
+          "ndcg@10": 0.9159520119790666,
+          "ndcg@20": 0.93158454812327,
+          "ndcg@50": 0.9397879575367936,
+          "mrr": 0.9918063186813187,
+          "recall@10": 0.9254904761904761,
+          "recall@20": 0.9673785714285714,
+          "hit@10": 0.999
+        },
+        "latency_ms": {
+          "mean_ms": 35.83167343802581,
+          "p50_ms": 36.729725514305755,
+          "p95_ms": 44.135704543441534,
+          "p99_ms": 45.35797847784124,
+          "std_ms": 7.596103526756656,
+          "min_ms": 12.123748019803315,
+          "max_ms": 45.70684302598238,
+          "n": 110,
+          "breakdown": {
+            "query_encoder": {
+              "mean_ms": 22.629669625100426,
+              "p50_ms": 22.06647998536937,
+              "p95_ms": 29.725723975570872,
+              "p99_ms": 31.057079829624854,
+              "std_ms": 5.129875586698331,
+              "min_ms": 9.669542021583766,
+              "max_ms": 31.927811971399933,
+              "n": 110
+            },
+            "ranking_head": {
+              "mean_ms": 10.512762644793838,
+              "p50_ms": 11.387392500182614,
+              "p95_ms": 13.021957117598502,
+              "p99_ms": 15.296201818273401,
+              "std_ms": 2.957466090646841,
+              "min_ms": 2.0565229933708906,
+              "max_ms": 15.63550200080499,
+              "n": 110
+            },
+            "query_encoder_timed": true
+          },
+          "query_encoder": "NeuML/pubmedbert-base-embeddings",
+          "use_controller": true
+        }
+      },
+      "cross_encoder_msmarco_minilm": {
+        "metrics": {
+          "ndcg@10": 0.8577685689671494,
+          "ndcg@20": 0.8744763356527333,
+          "ndcg@50": 0.8892948577688657,
+          "mrr": 0.9808431207622382,
+          "recall@10": 0.8563738095238096,
+          "recall@20": 0.9015952380952381,
+          "hit@10": 0.994
+        },
+        "latency_ms": {
+          "mean_ms": 127.45571196322668,
+          "p50_ms": 126.49571400834247,
+          "p95_ms": 170.62110895349176,
+          "p99_ms": 194.8412058636313,
+          "std_ms": 26.866342053286488,
+          "min_ms": 65.69888995727524,
+          "max_ms": 211.93621802376583,
+          "n": 110,
+          "batch_size": 95,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      },
+      "cross_encoder_bge_v2_m3": {
+        "metrics": {
+          "ndcg@10": 0.9066427661319425,
+          "ndcg@20": 0.9194362640406114,
+          "ndcg@50": 0.9300835697273149,
+          "mrr": 0.9803047144853749,
+          "recall@10": 0.9210880952380953,
+          "recall@20": 0.954802380952381,
+          "hit@10": 0.997
+        },
+        "latency_ms": {
+          "mean_ms": 681.3562266184653,
+          "p50_ms": 685.6491770013236,
+          "p95_ms": 863.204337193747,
+          "p99_ms": 900.6605147779918,
+          "std_ms": 107.25123227121337,
+          "min_ms": 424.8292699921876,
+          "max_ms": 959.8363490076736,
+          "n": 110,
+          "batch_size": 95,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      },
+      "cross_encoder_monot5_med": {
+        "metrics": {
+          "ndcg@10": 0.9117680686556355,
+          "ndcg@20": 0.9240915097998779,
+          "ndcg@50": 0.9342792601889671,
+          "mrr": 0.9869899224806202,
+          "recall@10": 0.9199476190476191,
+          "recall@20": 0.9524357142857143,
+          "hit@10": 0.997
+        },
+        "latency_ms": {
+          "mean_ms": 757.0066610086625,
+          "p50_ms": 743.71247048839,
+          "p95_ms": 1080.0125836918596,
+          "p99_ms": 1149.9606389697872,
+          "std_ms": 169.62389973288,
+          "min_ms": 394.82739701634273,
+          "max_ms": 1202.0887859980576,
+          "n": 110,
+          "batch_size": 95,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      },
+      "cross_encoder_monobert": {
+        "metrics": {
+          "ndcg@10": 0.8835499941772773,
+          "ndcg@20": 0.8984540354569858,
+          "ndcg@50": 0.9111511625051112,
+          "mrr": 0.9847563595224885,
+          "recall@10": 0.8851309523809523,
+          "recall@20": 0.925595238095238,
+          "hit@10": 0.996
+        },
+        "latency_ms": {
+          "mean_ms": 844.444678370862,
+          "p50_ms": 819.8149735108018,
+          "p95_ms": 1180.097876378568,
+          "p99_ms": 1278.4754351811716,
+          "std_ms": 184.85781757619213,
+          "min_ms": 443.48566402914,
+          "max_ms": 1336.9303729850799,
+          "n": 110,
+          "batch_size": 95,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      }
+    },
+    "medmcqa": {
+      "hybrid": {
+        "metrics": {
+          "ndcg@10": 0.4360572969672419,
+          "ndcg@20": 0.4519031678988771,
+          "ndcg@50": 0.46171464217573543,
+          "mrr": 0.38262410062660046,
+          "recall@10": 0.63270514330585,
+          "recall@20": 0.6947389085198272,
+          "hit@10": 0.63270514330585
+        },
+        "latency_ms": {
+          "mean_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "p99_ms": 0.0,
+          "std_ms": 0.0,
+          "min_ms": 0.0,
+          "max_ms": 0.0,
+          "n": 120,
+          "note": "first-stage order, no re-ranking step"
+        }
+      },
+      "rrf": {
+        "metrics": {
+          "ndcg@10": 0.42939329119188363,
+          "ndcg@20": 0.45672023460302225,
+          "ndcg@50": 0.4725255695172202,
+          "mrr": 0.3692294017369324,
+          "recall@10": 0.6568511974872399,
+          "recall@20": 0.7642324303101689,
+          "hit@10": 0.6568511974872399
+        },
+        "latency_ms": {
+          "mean_ms": 0.03283596438863738,
+          "p50_ms": 0.03170399577356875,
+          "p95_ms": 0.03666582924779503,
+          "p99_ms": 0.061700823716819266,
+          "std_ms": 0.00546606414950147,
+          "min_ms": 0.028843991458415985,
+          "max_ms": 0.0631880247965455,
+          "n": 110
+        }
+      },
+      "gardian": {
+        "metrics": {
+          "ndcg@10": 0.47980268878963506,
+          "ndcg@20": 0.4999260239457055,
+          "ndcg@50": 0.5152888514934395,
+          "mrr": 0.4213993066810122,
+          "recall@10": 0.6927758146839419,
+          "recall@20": 0.7722811150372988,
+          "hit@10": 0.6927758146839419
+        },
+        "latency_ms": {
+          "mean_ms": 32.536471873754635,
+          "p50_ms": 33.320927002932876,
+          "p95_ms": 39.778657379793,
+          "p99_ms": 42.221238169586286,
+          "std_ms": 5.229852325801762,
+          "min_ms": 19.639656995423138,
+          "max_ms": 44.07849098788574,
+          "n": 110,
+          "breakdown": {
+            "query_encoder": {
+              "mean_ms": 20.222214425765824,
+              "p50_ms": 20.510830509010702,
+              "p95_ms": 26.646612878539596,
+              "p99_ms": 28.585664778365754,
+              "std_ms": 3.6293491052434064,
+              "min_ms": 11.976661975495517,
+              "max_ms": 29.135262011550367,
+              "n": 110
+            },
+            "ranking_head": {
+              "mean_ms": 9.658804508878596,
+              "p50_ms": 10.942189517663792,
+              "p95_ms": 14.549439909751527,
+              "p99_ms": 15.534551970195025,
+              "std_ms": 3.4614343361704702,
+              "min_ms": 2.0884829573333263,
+              "max_ms": 15.548110997769982,
+              "n": 110
+            },
+            "query_encoder_timed": true
+          },
+          "query_encoder": "NeuML/pubmedbert-base-embeddings",
+          "use_controller": true
+        }
+      },
+      "cross_encoder_msmarco_minilm": {
+        "metrics": {
+          "ndcg@10": 0.45721150262908167,
+          "ndcg@20": 0.4801413208645392,
+          "ndcg@50": 0.49765947967769203,
+          "mrr": 0.405526481273212,
+          "recall@10": 0.6531213191990577,
+          "recall@20": 0.743031016882607,
+          "hit@10": 0.6531213191990577
+        },
+        "latency_ms": {
+          "mean_ms": 178.8444554803639,
+          "p50_ms": 181.94141751155257,
+          "p95_ms": 212.84663825354073,
+          "p99_ms": 220.71401049674023,
+          "std_ms": 22.10642615519848,
+          "min_ms": 115.47658400377259,
+          "max_ms": 222.99798001768067,
+          "n": 110,
+          "batch_size": 100,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      },
+      "cross_encoder_bge_v2_m3": {
+        "metrics": {
+          "ndcg@10": 0.49999738352421796,
+          "ndcg@20": 0.5214849102931349,
+          "ndcg@50": 0.5331941044125329,
+          "mrr": 0.4393128303809126,
+          "recall@10": 0.71849234393404,
+          "recall@20": 0.8036906164114644,
+          "hit@10": 0.71849234393404
+        },
+        "latency_ms": {
+          "mean_ms": 977.7022168818141,
+          "p50_ms": 983.8933860010002,
+          "p95_ms": 1145.4898387921276,
+          "p99_ms": 1180.4762434313307,
+          "std_ms": 116.09099827190268,
+          "min_ms": 664.8496349807829,
+          "max_ms": 1216.6095009888522,
+          "n": 110,
+          "batch_size": 100,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      },
+      "cross_encoder_monot5_med": {
+        "metrics": {
+          "ndcg@10": 0.49976889854973694,
+          "ndcg@20": 0.5209131870387391,
+          "ndcg@50": 0.533118293318736,
+          "mrr": 0.43891381368568233,
+          "recall@10": 0.7198665096191598,
+          "recall@20": 0.8025127601099332,
+          "hit@10": 0.7198665096191598
+        },
+        "latency_ms": {
+          "mean_ms": 1252.9238866758533,
+          "p50_ms": 1254.7905370010994,
+          "p95_ms": 1471.7048352351412,
+          "p99_ms": 1496.353023131378,
+          "std_ms": 151.27765458123937,
+          "min_ms": 716.9031100347638,
+          "max_ms": 1532.1404439746402,
+          "n": 110,
+          "batch_size": 100,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      },
+      "cross_encoder_monobert": {
+        "metrics": {
+          "ndcg@10": 0.48026174019553275,
+          "ndcg@20": 0.5036789503427486,
+          "ndcg@50": 0.5183169032635858,
+          "mrr": 0.4228297670445194,
+          "recall@10": 0.6929721240675304,
+          "recall@20": 0.7846486062033765,
+          "hit@10": 0.6929721240675304
+        },
+        "latency_ms": {
+          "mean_ms": 1189.9438100644727,
+          "p50_ms": 1201.2375545164105,
+          "p95_ms": 1412.300495232921,
+          "p99_ms": 1430.1087590469979,
+          "std_ms": 147.90790490358646,
+          "min_ms": 705.827078956645,
+          "max_ms": 1437.9213660140522,
+          "n": 110,
+          "batch_size": 100,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      }
+    }
+  }
+}

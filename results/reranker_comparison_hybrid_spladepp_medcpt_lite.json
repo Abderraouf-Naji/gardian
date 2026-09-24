@@ -1,0 +1,124 @@
+{
+  "meta": {
+    "created_utc": "2026-09-20T14:21:14.827598+00:00",
+    "script": "scripts/14_compare_rerankers.py",
+    "retriever": "hybrid_spladepp_medcpt",
+    "device": "cuda",
+    "systems": [
+      "hybrid",
+      "rrf",
+      "gardian"
+    ],
+    "cross_encoder_variants": [],
+    "datasets": [
+      "pubmedqa_labeled",
+      "medmcqa"
+    ],
+    "max_queries": null,
+    "seed": 42,
+    "latency_measured": false,
+    "latency_queries": null,
+    "latency_warmup": null,
+    "latency_gpu_contention": null,
+    "gpu_name": "NVIDIA A40",
+    "torch_version": "2.6.0+cu124",
+    "args": {
+      "retriever": "hybrid_spladepp_medcpt",
+      "datasets": "pubmedqa_labeled,medmcqa",
+      "device": "auto",
+      "output": "results/reranker_comparison_hybrid_spladepp_medcpt_lite.json",
+      "skip_backfill": false,
+      "overwrite_ce": false,
+      "fast": false,
+      "eval_only": true,
+      "ce_tags": null,
+      "max_queries": null,
+      "gardian_results_dir": "results/gardian_lite",
+      "no_cross_encoders": true,
+      "seed": 42,
+      "measure_latency": false,
+      "latency_queries": 200,
+      "latency_ce_batch": 0,
+      "latency_warmup": 10,
+      "cfg": "configs/base.yaml"
+    }
+  },
+  "results": {
+    "pubmedqa_labeled": {
+      "hybrid": {
+        "metrics": {
+          "ndcg@10": 0.913684133074677,
+          "ndcg@20": 0.9299369379577604,
+          "ndcg@50": 0.9386695857020161,
+          "mrr": 0.9916183473389356,
+          "recall@10": 0.9197071428571428,
+          "recall@20": 0.9634357142857143,
+          "hit@10": 0.999
+        },
+        "latency_ms": {}
+      },
+      "rrf": {
+        "metrics": {
+          "ndcg@10": 0.9035026431427061,
+          "ndcg@20": 0.9215802163852513,
+          "ndcg@50": 0.9297744117990949,
+          "mrr": 0.9877694444444444,
+          "recall@10": 0.9146738095238095,
+          "recall@20": 0.963452380952381,
+          "hit@10": 0.999
+        },
+        "latency_ms": {}
+      },
+      "gardian": {
+        "metrics": {
+          "ndcg@10": 0.9096995683775267,
+          "ndcg@20": 0.9257682823427197,
+          "ndcg@50": 0.9348838844399405,
+          "mrr": 0.9897510540184453,
+          "recall@10": 0.9204404761904762,
+          "recall@20": 0.9636119047619047,
+          "hit@10": 0.998
+        },
+        "latency_ms": {}
+      }
+    },
+    "medmcqa": {
+      "hybrid": {
+        "metrics": {
+          "ndcg@10": 0.4360572969672419,
+          "ndcg@20": 0.4519031678988771,
+          "ndcg@50": 0.46171464217573543,
+          "mrr": 0.38262410062660046,
+          "recall@10": 0.63270514330585,
+          "recall@20": 0.6947389085198272,
+          "hit@10": 0.63270514330585
+        },
+        "latency_ms": {}
+      },
+      "rrf": {
+        "metrics": {
+          "ndcg@10": 0.42939329119188363,
+          "ndcg@20": 0.45672023460302225,
+          "ndcg@50": 0.4725255695172202,
+          "mrr": 0.3692294017369324,
+          "recall@10": 0.6568511974872399,
+          "recall@20": 0.7642324303101689,
+          "hit@10": 0.6568511974872399
+        },
+        "latency_ms": {}
+      },
+      "gardian": {
+        "metrics": {
+          "ndcg@10": 0.4780130520096716,
+          "ndcg@20": 0.499754271180105,
+          "ndcg@50": 0.5142700360277169,
+          "mrr": 0.4202317451123797,
+          "recall@10": 0.690223792697291,
+          "recall@20": 0.7756183745583038,
+          "hit@10": 0.690223792697291
+        },
+        "latency_ms": {}
+      }
+    }
+  }
+}

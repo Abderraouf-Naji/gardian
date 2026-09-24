@@ -1,0 +1,113 @@
+{
+  "meta": {
+    "created_utc": "2026-09-23T16:23:36.466087+00:00",
+    "script": "scripts/run_ltr_baseline.py",
+    "lightgbm_version": "4.7.0",
+    "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+    "python_version": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "dropped_features": [],
+    "seed": 21
+  },
+  "results": {
+    "hybrid_spladepp_medcpt": {
+      "retriever": "hybrid_spladepp_medcpt",
+      "n_features": 16,
+      "n_trees": 256,
+      "best_iteration": 256,
+      "train_wall_clock_sec": 224.68858049507253,
+      "train_queries": 186504,
+      "loaded_from_saved_model": false,
+      "model_size_bytes": 1832211,
+      "model_path": "results/ltr_lambdamart_hybrid_spladepp_medcpt_seed21.txt",
+      "feature_gain_fraction": [
+        0.0044973705866912985,
+        0.015634431747316428,
+        0.007195261894066504,
+        0.02940202416847048,
+        0.1117755149050499,
+        0.050786069689348165,
+        0.003793119192638334,
+        0.00037441759524585574,
+        0.0009657576539277975,
+        0.005060456899202797,
+        0.00042248152763259375,
+        0.5582540070796765,
+        0.15181585908954687,
+        0.04899530816693259,
+        0.00817460289481854,
+        0.002853316909435255
+      ],
+      "results": {
+        "pubmedqa_labeled": {
+          "split": "eval",
+          "n_queries": 1000,
+          "metrics": {
+            "ndcg@5": 0.8998645236862525,
+            "ndcg@10": 0.9231305184932203,
+            "ndcg@20": 0.9358187343583011,
+            "mrr": 0.992275,
+            "recall@10": 0.9353333333333332,
+            "recall@20": 0.9700119047619048,
+            "hit@10": 0.999
+          },
+          "latency_ms": {
+            "p50_ms": 0.3627444966696203,
+            "mean_ms": 0.40070382587146014,
+            "p95_ms": 0.4863574053160844,
+            "n": 200
+          }
+        },
+        "medmcqa": {
+          "split": "test",
+          "n_queries": 5094,
+          "metrics": {
+            "ndcg@5": 0.4411857767112143,
+            "ndcg@10": 0.47937661255485486,
+            "ndcg@20": 0.5005953236997885,
+            "mrr": 0.42169782126071015,
+            "recall@10": 0.6917942677659992,
+            "recall@20": 0.7754220651747153,
+            "hit@10": 0.6917942677659992
+          },
+          "latency_ms": {
+            "p50_ms": 0.41388446697965264,
+            "mean_ms": 0.4279848566511646,
+            "p95_ms": 0.5096387409139423,
+            "n": 200
+          }
+        },
+        "pubmedqa_artificial": {
+          "split": "test",
+          "n_queries": 18218,
+          "metrics": {
+            "ndcg@5": 0.769649363429775,
+            "ndcg@10": 0.806954423375473,
+            "ndcg@20": 0.8293087588241431,
+            "mrr": 0.9230198283210217,
+            "recall@10": 0.8451174662421781,
+            "recall@20": 0.9098382552054745,
+            "hit@10": 0.985618618948293
+          },
+          "latency_ms": {
+            "p50_ms": 0.45022700214758515,
+            "mean_ms": 0.4565626516705379,
+            "p95_ms": 0.5211749346926807,
+            "n": 200
+          }
+        }
+      },
+      "hyperparameters": {
+        "objective": "lambdarank",
+        "n_estimators": 1000,
+        "learning_rate": 0.05,
+        "num_leaves": 63,
+        "min_child_samples": 20,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "early_stopping_rounds": 50,
+        "seed": 21,
+        "n_jobs": 8
+      }
+    }
+  }
+}

@@ -134,8 +134,13 @@ and reported on the same query population as GARDIAN:
   *ceiling*, never a competitor, and only at the cutoff it optimises.
 * **Oracle re-ranking / pool_recall** -- shows the ranking headroom, which is
   2.3x the alpha headroom on every benchmark.
-* **LambdaMART** on the identical 16 features, which scores 0.8065 / 0.5092 --
-  slightly *above* the neural model, and must be reported.
+* **LambdaMART** on the identical 16 features (`scripts/run_ltr_baseline.py`),
+  which lands slightly *above* the neural model and must be reported. On the
+  gold-in-pool population it scores 0.8065 / 0.5092; on the full population
+  used by section 4 and the paper tables it scores 0.8041 (PubMedQA-art.),
+  0.4274 (MedMCQA) and 0.9093 (PubMedQA-Labeled), against GARDIAN's 0.7932 /
+  0.4256 / 0.9074. See section 10 -- the two populations are not
+  interchangeable.
 
 ## 7. Removed
 
@@ -157,17 +162,50 @@ and reported on the same query population as GARDIAN:
   re-encoded the whole split with a BERT pass per query while a 234k-query
   cache sat unused on disk (18,218 needless encodes per PubMedQA run).
 * **Memory** 19 GB -> 2.47 GB; **speed** 82 -> ~9 min/epoch.
-* **142 tests** (was 96), including regression tests for three bugs found
+* **181 tests** (was 96), including regression tests for five bugs found
   during this work: an oracle row that scored *below* the system it bounds at
   cutoffs it does not optimise; a Group-alpha row that silently reported
-  Global-alpha; and a stale ablation name that would have crashed a paper run.
+  Global-alpha; a stale ablation name that would have crashed a paper run; a
+  latency benchmark that encoded the query *outside* its own timer, so the
+  controller's cost was invisible; and `load_checkpoint_state` dereferencing
+  `model.controller` unconditionally, which made every GARDIAN-Lite checkpoint
+  unloadable.
 
 ## 9. Open items
 
-* GARDIAN-Lite (`--no-controller`, 4.25M params, no query encoder) is
-  implemented but not yet trained and evaluated.
+Done since this list was written:
+
+* **Multi-seed.** All four back-ends are trained at all five seeds (13, 21, 42,
+  87, 100); `results/aggregated/training_summary.json` carries mean/std for
+  every cell. The SPLADE++ back-ends are included.
+* **LambdaMART is reproducible again.** `scripts/run_ltr_baseline.py` was cited
+  in `docs/OBJECTIVE.md` but never committed; it now exists and trains on the
+  full 16.4M-row pool in ~8 min on CPU.
+
+Still open:
+
+* GARDIAN-Lite (`--no-controller`, 4.25M params, no query encoder): training
+  and evaluation are in progress at seed 42 on all four back-ends
+  (`results/gardian_lite/`, `scripts/run_rq4_lite_eval.sh`). Not yet
+  multi-seed.
 * A flat MLP over all 16 concatenated features -- the "why two branches?"
   control -- is not yet run.
-* Multi-seed (13, 21, 87, 100) and paired-bootstrap significance.
-* SPLADE++ back-ends not yet trained on the new configuration.
+* Paired-bootstrap significance on the retrieval tables.
 * Real-judgment collections beyond TREC-COVID (NFCorpus, SciFact).
+
+## 10. A note on comparing numbers across documents
+
+Two evaluation populations appear in these documents and they are not
+interchangeable:
+
+* **Full population** -- every query in the split, with per-query pool labels
+  where no qrels entry exists. This is what `src/evaluation/rank_jsonl_eval.py`
+  reports, and what section 4 above and the paper tables use.
+* **Gold-in-pool population** -- only queries whose gold passage is in the
+  candidate pool. This is what the tables in `docs/OBJECTIVE.md` section 3a
+  use, and it reads 5-8 points higher on MedMCQA.
+
+Quoting a gold-in-pool number beside a full-population one overstates the gap.
+`scripts/run_ltr_baseline.py` reports the full population, so its output is
+directly comparable to the paper tables and *not* to `docs/OBJECTIVE.md`
+section 3a.

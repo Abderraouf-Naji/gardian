@@ -1,0 +1,272 @@
+{
+  "meta": {
+    "created_utc": "2026-09-20T18:42:12.744884+00:00",
+    "script": "scripts/14_compare_rerankers.py",
+    "retriever": "hybrid_spladepp_medcpt",
+    "device": "cuda",
+    "systems": [
+      "hybrid",
+      "rrf",
+      "cross_encoder_msmarco_minilm",
+      "cross_encoder_bge_v2_m3",
+      "cross_encoder_monot5_med",
+      "cross_encoder_monobert",
+      "gardian"
+    ],
+    "cross_encoder_variants": [
+      {
+        "tag": "msmarco_minilm",
+        "model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "backend": "st",
+        "result_key": "cross_encoder_msmarco_minilm"
+      },
+      {
+        "tag": "bge_v2_m3",
+        "model": "BAAI/bge-reranker-v2-m3",
+        "backend": "st",
+        "result_key": "cross_encoder_bge_v2_m3"
+      },
+      {
+        "tag": "monot5_med",
+        "model": "castorini/monot5-base-med-msmarco",
+        "backend": "monot5",
+        "result_key": "cross_encoder_monot5_med"
+      },
+      {
+        "tag": "monobert",
+        "model": "castorini/monobert-large-msmarco",
+        "backend": "monobert",
+        "result_key": "cross_encoder_monobert"
+      }
+    ],
+    "datasets": [
+      "pubmedqa_artificial"
+    ],
+    "max_queries": 1000,
+    "seed": 42,
+    "latency_measured": true,
+    "latency_queries": 120,
+    "latency_warmup": 10,
+    "latency_gpu_contention": {
+      "available": true,
+      "total_processes": 3,
+      "other_processes": 2,
+      "exclusive": false
+    },
+    "gpu_name": "NVIDIA A40",
+    "torch_version": "2.6.0+cu124",
+    "args": {
+      "retriever": "hybrid_spladepp_medcpt",
+      "datasets": "pubmedqa_artificial",
+      "device": "auto",
+      "output": "results/reranker_comparison_hybrid_spladepp_medcpt_pqa_a_q1000.json",
+      "skip_backfill": false,
+      "overwrite_ce": false,
+      "fast": false,
+      "eval_only": true,
+      "ce_tags": null,
+      "max_queries": 1000,
+      "gardian_results_dir": null,
+      "no_cross_encoders": false,
+      "seed": 42,
+      "measure_latency": true,
+      "latency_queries": 120,
+      "latency_ce_batch": 0,
+      "latency_warmup": 10,
+      "cfg": "configs/base.yaml"
+    }
+  },
+  "results": {
+    "pubmedqa_artificial": {
+      "hybrid": {
+        "metrics": {
+          "ndcg@10": 0.7618532361265397,
+          "ndcg@20": 0.793943810109801,
+          "ndcg@50": 0.814486225223513,
+          "mrr": 0.9132753456579102,
+          "recall@10": 0.7921333333333332,
+          "recall@20": 0.8838333333333332,
+          "hit@10": 0.98
+        },
+        "latency_ms": {
+          "mean_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "p99_ms": 0.0,
+          "std_ms": 0.0,
+          "min_ms": 0.0,
+          "max_ms": 0.0,
+          "n": 120,
+          "note": "first-stage order, no re-ranking step"
+        }
+      },
+      "rrf": {
+        "metrics": {
+          "ndcg@10": 0.7601218253911364,
+          "ndcg@20": 0.7899617593894422,
+          "ndcg@50": 0.8095263725752735,
+          "mrr": 0.9070718600835908,
+          "recall@10": 0.79955,
+          "recall@20": 0.8851666666666668,
+          "hit@10": 0.981
+        },
+        "latency_ms": {
+          "mean_ms": 0.03375338168222119,
+          "p50_ms": 0.03243598621338606,
+          "p95_ms": 0.03671546000987291,
+          "p99_ms": 0.060522189596667865,
+          "std_ms": 0.005871663863140009,
+          "min_ms": 0.029015005566179752,
+          "max_ms": 0.07920904317870736,
+          "n": 110
+        }
+      },
+      "gardian": {
+        "metrics": {
+          "ndcg@10": 0.8049791233150905,
+          "ndcg@20": 0.8276330412134429,
+          "ndcg@50": 0.8462681163162306,
+          "mrr": 0.931992509047705,
+          "recall@10": 0.8402166666666667,
+          "recall@20": 0.9059166666666666,
+          "hit@10": 0.983
+        },
+        "latency_ms": {
+          "mean_ms": 30.303721705091778,
+          "p50_ms": 30.163943505613133,
+          "p95_ms": 39.44819169410039,
+          "p99_ms": 42.531122424406924,
+          "std_ms": 5.379114096962748,
+          "min_ms": 18.296706024557352,
+          "max_ms": 43.26297697843984,
+          "n": 110,
+          "breakdown": {
+            "query_encoder": {
+              "mean_ms": 19.90900964275087,
+              "p50_ms": 20.43025949387811,
+              "p95_ms": 27.63342923426535,
+              "p99_ms": 29.879625561879944,
+              "std_ms": 4.642492399740902,
+              "min_ms": 11.625506973359734,
+              "max_ms": 30.120398965664208,
+              "n": 110
+            },
+            "ranking_head": {
+              "mean_ms": 8.042248750676993,
+              "p50_ms": 7.566000509541482,
+              "p95_ms": 13.184869196265934,
+              "p99_ms": 15.287388137076048,
+              "std_ms": 3.081062721478288,
+              "min_ms": 2.018772007431835,
+              "max_ms": 15.439086011610925,
+              "n": 110
+            },
+            "query_encoder_timed": true
+          },
+          "query_encoder": "NeuML/pubmedbert-base-embeddings",
+          "use_controller": true
+        }
+      },
+      "cross_encoder_msmarco_minilm": {
+        "metrics": {
+          "ndcg@10": 0.654259726420065,
+          "ndcg@20": 0.6836796640940976,
+          "ndcg@50": 0.714692688390428,
+          "mrr": 0.8540730782812661,
+          "recall@10": 0.6666333333333333,
+          "recall@20": 0.7534666666666666,
+          "hit@10": 0.955
+        },
+        "latency_ms": {
+          "mean_ms": 144.63808372013526,
+          "p50_ms": 146.7110679950565,
+          "p95_ms": 190.82296527340077,
+          "p99_ms": 196.365645469632,
+          "std_ms": 25.487827060159617,
+          "min_ms": 86.17550699273124,
+          "max_ms": 210.82287497119978,
+          "n": 110,
+          "batch_size": 98,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      },
+      "cross_encoder_bge_v2_m3": {
+        "metrics": {
+          "ndcg@10": 0.7986022554504189,
+          "ndcg@20": 0.8239852762608932,
+          "ndcg@50": 0.8405729373607526,
+          "mrr": 0.9138982257236514,
+          "recall@10": 0.8408833333333332,
+          "recall@20": 0.91525,
+          "hit@10": 0.98
+        },
+        "latency_ms": {
+          "mean_ms": 781.950552199057,
+          "p50_ms": 774.381709023146,
+          "p95_ms": 1041.0675854218425,
+          "p99_ms": 1087.8464149718639,
+          "std_ms": 140.26993977432343,
+          "min_ms": 464.1046819742769,
+          "max_ms": 1127.6410519494675,
+          "n": 110,
+          "batch_size": 98,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      },
+      "cross_encoder_monot5_med": {
+        "metrics": {
+          "ndcg@10": 0.7461702821771296,
+          "ndcg@20": 0.7721744582594494,
+          "ndcg@50": 0.7973365869250472,
+          "mrr": 0.890015178064646,
+          "recall@10": 0.7832166666666666,
+          "recall@20": 0.8579666666666667,
+          "hit@10": 0.979
+        },
+        "latency_ms": {
+          "mean_ms": 924.2763447379482,
+          "p50_ms": 899.0460410132073,
+          "p95_ms": 1311.7658462986583,
+          "p99_ms": 1375.0330238073366,
+          "std_ms": 222.70810792879504,
+          "min_ms": 473.19896100088954,
+          "max_ms": 1500.7302869926207,
+          "n": 110,
+          "batch_size": 98,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      },
+      "cross_encoder_monobert": {
+        "metrics": {
+          "ndcg@10": 0.6869021927531236,
+          "ndcg@20": 0.7145056272069535,
+          "ndcg@50": 0.7444976751816555,
+          "mrr": 0.8479331755466925,
+          "recall@10": 0.7258,
+          "recall@20": 0.8058,
+          "hit@10": 0.964
+        },
+        "latency_ms": {
+          "mean_ms": 941.3257900953547,
+          "p50_ms": 945.3088270092849,
+          "p95_ms": 1242.4352675006958,
+          "p99_ms": 1321.415955859702,
+          "std_ms": 178.30398994961914,
+          "min_ms": 517.8077790187672,
+          "max_ms": 1390.838232007809,
+          "n": 110,
+          "batch_size": 98,
+          "batch_size_policy": "one batch per candidate pool",
+          "fp16": true,
+          "max_length": 512
+        }
+      }
+    }
+  }
+}

@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.common.hybrid_retrievers import FOCUS_HYBRID_RETRIEVERS
 from src.evaluation.index_stats import report_all_index_sizes
+from src.common.seeds import resolve_seed_checkpoint
 from src.model.gardian import build_gardian_from_model_cfg, load_checkpoint_state
 from src.pipeline.gardian_adaptive import retrieve_adaptive_candidates_live
 from src.pipeline.rag_reader import build_retriever_for_qa
@@ -73,8 +74,10 @@ def _latency_stats(samples_ms: List[float]) -> Dict[str, float]:
     }
 
 
-def _load_gardian(cfg: Any, retriever: str, device: str):
-    ckpt_path = Path(cfg.paths.results_dir) / f"gardian_best_{retriever}.pt"
+def _load_gardian(cfg: Any, retriever: str, device: str, seed: int = 42):
+    # Checkpoints live under results/seeds/seed_<S>/ since the multi-seed
+    # protocol landed; the flat path this used to read no longer exists.
+    ckpt_path = resolve_seed_checkpoint(cfg.paths.results_dir, retriever, seed)
     if not ckpt_path.is_file():
         raise FileNotFoundError(f"GARDIAN checkpoint missing: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -121,7 +124,7 @@ def benchmark_one_setting(
     encoder = None
     if not skip_gardian:
         try:
-            gardian = _load_gardian(cfg, retriever, device)
+            gardian = _load_gardian(cfg, retriever, device, seed=seed)
             encoder = SentenceTransformer(str(cfg.encoder.model_name), device=device)
         except FileNotFoundError as exc:
             logger.warning(f"Skipping GARDIAN timing for {retriever}: {exc}")
@@ -135,16 +138,25 @@ def benchmark_one_setting(
         sparse_ms.append(_timed_ms(lambda: first.retrieve(qtext)))
         dense_ms.append(_timed_ms(lambda: second.retrieve(qtext)))
         hybrid_ms.append(_timed_ms(lambda: hybrid.retrieve(qtext)))
-        if gardian is not None and encoder is not None and q_emb is not None and q_oh is not None:
+        if gardian is not None and encoder is not None:
 
             def _gardian_retrieve_path() -> None:
+                # The controller conditions on the query embedding, so a
+                # deployed system runs the encoder per query. Encoding outside
+                # this function would report a latency no deployment can
+                # achieve, and would make the controller look free -- which is
+                # precisely the cost GARDIAN-Lite removes. Measured on an A40,
+                # the encoder is ~19 ms of GARDIAN's ~25 ms re-ranking cost.
+                emb = encoder.encode(
+                    [qtext], normalize_embeddings=True, convert_to_numpy=True
+                )[0].tolist()
                 # Live path: adaptive retrieve (rerank needs offline sparse_feats in candidates).
                 retrieve_adaptive_candidates_live(
                     qtext,
                     hybrid,
                     gardian,
-                    query_emb=q_emb,
-                            cfg=cfg,
+                    query_emb=emb,
+                    cfg=cfg,
                     device=device,
                 )
 
@@ -183,7 +195,11 @@ def benchmark_one_setting(
     }
     if gardian_ms:
         out["gardian"] = _latency_stats(gardian_ms)
-        out["gardian"]["note"] = "adaptive retrieve only (rerank uses offline rank features)"
+        out["gardian"]["note"] = (
+            "query encode + adaptive retrieve (rerank uses offline rank features)"
+        )
+        out["gardian"]["query_encoder"] = str(cfg.encoder.model_name)
+        out["gardian"]["query_encoder_timed"] = True
     else:
         out["gardian"] = {"mean_ms": None, "p50_ms": None, "p95_ms": None, "n": 0, "skipped": True}
     return out

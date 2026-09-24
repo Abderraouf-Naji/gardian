@@ -696,6 +696,16 @@ def main():
         help="Mix raw branch outputs, as in the CoopIS submission.",
     )
     parser.add_argument(
+        "--results-dir",
+        type=str,
+        default=None,
+        help=(
+            "Override paths.results_dir. Use this to keep a variant run "
+            "(e.g. --no-controller) in its own artifact tree instead of "
+            "colliding with the main per-seed checkpoints."
+        ),
+    )
+    parser.add_argument(
         "--no-controller",
         action="store_true",
         help=(
@@ -806,6 +816,10 @@ def main():
             f"{cfg.training.loss!r}): standardising a branch requires the pool to "
             "standardise it over, and the pairwise path has no pool."
         )
+
+    if args.results_dir is not None:
+        cfg.paths.results_dir = str(args.results_dir)
+        logger.info(f"Overriding cfg.paths.results_dir -> {cfg.paths.results_dir}")
 
     if args.no_controller:
         cfg.model.use_controller = False

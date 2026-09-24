@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import pathlib
 import sys
 from datetime import datetime, timezone
@@ -44,6 +45,15 @@ _ce13_spec.loader.exec_module(ce13)
 from src.common.question_types import assert_cfg_question_types
 from src.common.rank_data_paths import normalize_retriever_name, resolve_rank_data_file
 from src.evaluation.rank_jsonl_eval import evaluate_all_from_rank_data
+from src.common.passage_lookup import build_passage_text_lookup, passage_text_for_record
+from src.evaluation.rerank_latency import (
+    latency_stats,
+    log_summary,
+    select_timing_pools,
+    time_cross_encoder,
+    time_gardian,
+    time_rrf,
+)
 from src.retrieval.cross_encoder import CROSS_ENCODER_PRESETS, CrossEncoderScorer
 
 # Reuse 05 helpers without importing scripts as modules.
@@ -79,6 +89,12 @@ DEFAULT_CE_VARIANTS: List[Dict[str, Any]] = [
         "batch_size": 64,
     },
     {
+        "tag": "bge_v2_m3",
+        "model": "bge_v2_m3",
+        "backend": "st",
+        "batch_size": 32,
+    },
+    {
         "tag": "monot5_med",
         "model": "monot5_med",
         "backend": "monot5",
@@ -99,6 +115,12 @@ FAST_CE_VARIANTS: List[Dict[str, Any]] = [
         "model": "msmarco_minilm",
         "backend": "st",
         "batch_size": 128,
+    },
+    {
+        "tag": "bge_v2_m3",
+        "model": "bge_v2_m3",
+        "backend": "st",
+        "batch_size": 64,
     },
     {
         "tag": "monot5_med",
@@ -327,14 +349,18 @@ def _write_csv(path: pathlib.Path, payload: Dict[str, Any]) -> None:
     rows: List[Dict[str, str]] = []
     retriever = payload["meta"]["retriever"]
     for dataset_name, systems in payload["results"].items():
-        for system, metrics in systems.items():
+        for system, block in systems.items():
             row = {
                 "retriever": retriever,
                 "dataset": dataset_name,
                 "system": system,
             }
-            for k, v in metrics.items():
-                row[k] = f"{v:.6f}"
+            for k, v in (block.get("metrics") or {}).items():
+                row[k] = f"{float(v):.6f}"
+            lat = block.get("latency_ms") or {}
+            for k in ("p50_ms", "mean_ms", "p95_ms"):
+                if k in lat and lat[k] is not None:
+                    row[k] = f"{float(lat[k]):.3f}"
             rows.append(row)
 
     if not rows:
@@ -352,6 +378,194 @@ def _write_csv(path: pathlib.Path, payload: Dict[str, Any]) -> None:
         writer.writerows(rows)
 
 
+
+
+def _gpu_contention() -> Dict[str, Any]:
+    """
+    How many other processes hold the GPU while timing.
+
+    A p50 measured under contention reports queueing, not compute: on this
+    machine GARDIAN's median went from 24.5 ms to 51.7 ms with two other jobs
+    resident, with no code change. Recording the count means a contended
+    measurement can be spotted in the artifact instead of being quoted as if
+    it were clean.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        pids = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+    except (OSError, subprocess.SubprocessError):
+        return {"available": False}
+    mine = str(os.getpid())
+    others = [p for p in pids if p != mine]
+    return {
+        "available": True,
+        "total_processes": len(pids),
+        "other_processes": len(others),
+        "exclusive": len(others) == 0,
+    }
+
+
+def _measure_latency_for_dataset(
+    rank_path: pathlib.Path,
+    *,
+    dataset_name: str,
+    cfg: Any,
+    model: Any,
+    device: str,
+    ce_variants: List[Dict[str, Any]],
+    n_queries: int,
+    warmup: int,
+    seed: int,
+    ce_batch: int = 0,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Time every system re-ranking the SAME candidate pools.
+
+    First-stage retrieval is shared by all systems and is excluded, so these
+    numbers are the marginal cost of re-ranking. GARDIAN's timed region
+    includes the PubMedBERT query-encoder forward whenever the controller is
+    enabled, because a deployed system cannot precompute an unseen query's
+    embedding.
+    """
+    from collections import defaultdict
+
+    records_by_qid: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for rec in ce13._load_records(rank_path):
+        records_by_qid[rec["qid"]].append(rec)
+
+    pools, questions, _qids = select_timing_pools(
+        records_by_qid, n_queries=n_queries, seed=seed
+    )
+    if not pools:
+        logger.warning(f"No pools to time for {dataset_name}")
+        return {}
+
+    logger.info(
+        f"  Latency: {len(pools)} queries, pool size "
+        f"{min(len(p) for p in pools)}-{max(len(p) for p in pools)} candidates, "
+        f"warmup={warmup}"
+    )
+
+    out: Dict[str, Dict[str, Any]] = {}
+    out["rrf"] = time_rrf(pools, warmup=warmup)
+    log_summary("rrf", out["rrf"])
+
+    # Cross-encoders need the passage text, which rank JSONL does not store.
+    corpus_paths = [p for p in ce13._corpus_paths_for_dataset(dataset_name, cfg) if p.is_file()]
+    if not corpus_paths:
+        unified = pathlib.Path(str(getattr(cfg.paths, "corpus_jsonl", "") or ""))
+        if unified.is_file():
+            corpus_paths = [unified]
+    wanted_pids = {str(r["pid"]) for pool in pools for r in pool}
+    logger.info(f"  Resolving {len(wanted_pids):,} passage texts for CE timing...")
+    lookup = build_passage_text_lookup(wanted_pids, corpus_paths)
+    missing = len(wanted_pids) - len(lookup)
+    # A cross-encoder scoring empty strings is fast and meaningless. Silently
+    # timing that would hand the paper a latency advantage that does not exist,
+    # so an unresolved corpus is a hard failure rather than a warning.
+    if missing:
+        frac = missing / max(len(wanted_pids), 1)
+        msg = (
+            f"{missing:,}/{len(wanted_pids):,} passage texts ({frac:.1%}) could not be "
+            f"resolved for {dataset_name} from {[str(p) for p in corpus_paths]}. "
+            "Cross-encoder timing on empty text is not a measurement."
+        )
+        if frac > 0.01:
+            raise RuntimeError(msg)
+        logger.warning(f"  {msg} Continuing: under the 1% tolerance.")
+
+    def _ptext(rec: Dict[str, Any]) -> str:
+        return passage_text_for_record(rec, lookup)
+
+    sample = [_ptext(r) for r in pools[0]]
+    mean_chars = sum(len(t) for t in sample) / max(len(sample), 1)
+    logger.info(f"  Passage text resolved (first pool mean {mean_chars:.0f} chars/passage)")
+
+    fp16 = bool(getattr(cfg.retrieval, "cross_encoder_fp16", True))
+    # Batch size for timing. The backfill batch sizes are tuned for bulk
+    # throughput over a whole split; timing a single query's pool with them
+    # would split ~95 candidates into a dozen forward passes and report a
+    # latency no sensible deployment would accept. The default here is one
+    # batch per pool, which is the same courtesy GARDIAN gets -- its whole pool
+    # goes through in a single forward. Reviewers asked for the batch settings
+    # behind the reported latency, so the chosen value is recorded per system.
+    max_pool = max(len(p) for p in pools)
+    timing_batch = int(ce_batch) if ce_batch and ce_batch > 0 else max_pool
+    logger.info(
+        f"  CE timing batch size: {timing_batch} "
+        f"({'explicit' if ce_batch else 'one batch per pool'}; max pool {max_pool})"
+    )
+    for variant in ce_variants:
+        model_name = str(variant["model"])
+        if model_name in CROSS_ENCODER_PRESETS:
+            model_name = CROSS_ENCODER_PRESETS[model_name]
+        scorer = CrossEncoderScorer(
+            model_name,
+            device=device,
+            max_length=int(cfg.retrieval.cross_encoder_max_length),
+            batch_size=timing_batch,
+            backend=str(variant["backend"]),
+            fp16=fp16,
+        )
+        key = f"cross_encoder_{variant['tag']}"
+        out[key] = time_cross_encoder(
+            pools,
+            questions=questions,
+            passage_text=_ptext,
+            scorer=scorer,
+            device=device,
+            warmup=warmup,
+        )
+        out[key]["batch_size"] = timing_batch
+        out[key]["batch_size_policy"] = (
+            "explicit" if ce_batch else "one batch per candidate pool"
+        )
+        out[key]["fp16"] = fp16
+        out[key]["max_length"] = int(cfg.retrieval.cross_encoder_max_length)
+        log_summary(key, out[key])
+        del scorer
+        if str(device).startswith("cuda"):
+            torch.cuda.empty_cache()
+
+    # GARDIAN: the controller reads the query embedding, so the encoder pass is
+    # on the inference path and is timed. GARDIAN-Lite has no controller and no
+    # encoder, and the flag records which arm this is.
+    uses_controller = getattr(model, "controller", None) is not None
+    encoder = None
+    if uses_controller:
+        from sentence_transformers import SentenceTransformer
+
+        encoder = SentenceTransformer(str(cfg.encoder.model_name), device=device)
+    out["gardian"] = time_gardian(
+        pools,
+        questions=questions,
+        model=model,
+        query_encoder=encoder,
+        device=device,
+        warmup=warmup,
+        encode_query=uses_controller,
+    )
+    out["gardian"]["query_encoder"] = str(cfg.encoder.model_name) if uses_controller else None
+    out["gardian"]["use_controller"] = bool(uses_controller)
+    log_summary("gardian", out["gardian"])
+    if encoder is not None:
+        del encoder
+        if str(device).startswith("cuda"):
+            torch.cuda.empty_cache()
+
+    # "hybrid" is the unreranked first-stage order: no re-ranking cost at all.
+    out["hybrid"] = latency_stats([0.0] * len(pools))
+    out["hybrid"]["note"] = "first-stage order, no re-ranking step"
+    return out
+
+
 def run_comparison_for_retriever(
     retriever: str,
     *,
@@ -366,6 +580,8 @@ def run_comparison_for_retriever(
         logger.warning(f"No rank JSONL for {retriever!r}; skipping.")
         return pathlib.Path()
 
+    seed = int(args.seed if args.seed is not None else getattr(cfg, "seed", 42))
+
     out_dir = pathlib.Path(cfg.paths.results_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     q_suffix = f"_q{args.max_queries}" if args.max_queries else ""
@@ -377,8 +593,17 @@ def run_comparison_for_retriever(
     csv_path = json_path.with_suffix(".csv")
 
     _build = _import_build_model()
+    ckpt_cfg = cfg
+    if args.gardian_results_dir:
+        ckpt_cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+        ckpt_cfg.paths.results_dir = str(args.gardian_results_dir)
+        logger.info(f"Resolving GARDIAN checkpoint from {args.gardian_results_dir!r}")
     logger.info(f"Loading GARDIAN checkpoint for {retriever!r} on {device!r}")
-    model, expected_qdim = _build(cfg, device, retriever)
+    model, expected_qdim = _build(ckpt_cfg, device, retriever, seed)
+    logger.info(
+        "Loaded model: controller "
+        + ("ON" if getattr(model, "controller", None) is not None else "OFF (GARDIAN-Lite)")
+    )
 
     all_results: Dict[str, Dict[str, Dict[str, float]]] = {}
     ce_variant_meta: List[Dict[str, str]] = []
@@ -398,7 +623,6 @@ def run_comparison_for_retriever(
     skip_backfill = args.skip_backfill or args.eval_only
     systems_order = _systems_reported(ce_variants)
 
-    seed = int(getattr(cfg, "seed", 42))
     for dataset_name, _split, rank_path in jobs:
         work_path = rank_path
         if args.max_queries:
@@ -437,10 +661,35 @@ def run_comparison_for_retriever(
                 continue
             stack[f"cross_encoder_{variant['tag']}"] = _eval_cross_encoder(ce_path)
 
-        all_results[dataset_name] = stack
         print_comparison_table(
             dataset_name, retriever, stack, system_order=systems_order
         )
+
+        lat: Dict[str, Dict[str, Any]] = {}
+        if args.measure_latency:
+            logger.info(f"  Timing re-rankers on {dataset_name}...")
+            lat = _measure_latency_for_dataset(
+                work_path,
+                dataset_name=dataset_name,
+                cfg=cfg,
+                model=model,
+                device=device,
+                ce_variants=ce_variants,
+                n_queries=int(args.latency_queries),
+                warmup=int(args.latency_warmup),
+                seed=seed,
+                ce_batch=int(args.latency_ce_batch),
+            )
+
+        # Nested schema: metrics and latency are separate blocks per system,
+        # which is what scripts/plot_reranker_comparison.py reads.
+        all_results[dataset_name] = {
+            name: {
+                "metrics": metrics,
+                "latency_ms": lat.get(name, {}),
+            }
+            for name, metrics in stack.items()
+        }
 
     payload = {
         "meta": {
@@ -452,6 +701,17 @@ def run_comparison_for_retriever(
             "cross_encoder_variants": ce_variant_meta,
             "datasets": datasets,
             "max_queries": args.max_queries,
+            "seed": seed,
+            "latency_measured": bool(args.measure_latency),
+            "latency_queries": int(args.latency_queries) if args.measure_latency else None,
+            "latency_warmup": int(args.latency_warmup) if args.measure_latency else None,
+            "latency_gpu_contention": _gpu_contention() if args.measure_latency else None,
+            "gpu_name": (
+                torch.cuda.get_device_name(0)
+                if str(device).startswith("cuda") and torch.cuda.is_available()
+                else None
+            ),
+            "torch_version": torch.__version__,
             "args": vars(args),
         },
         "results": all_results,
@@ -537,6 +797,63 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--gardian-results-dir",
+        type=str,
+        default=None,
+        help=(
+            "Resolve the GARDIAN checkpoint from this artifact tree instead of "
+            "paths.results_dir. Use results/gardian_lite to evaluate or time "
+            "the --no-controller arm against the same pools."
+        ),
+    )
+    parser.add_argument(
+        "--no-cross-encoders",
+        action="store_true",
+        help="Evaluate only hybrid / RRF / GARDIAN (skips every cross-encoder arm).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Seed whose GARDIAN checkpoint is evaluated (default: cfg.seed). "
+            "Also seeds --max-queries subsampling."
+        ),
+    )
+    parser.add_argument(
+        "--measure-latency",
+        action="store_true",
+        help=(
+            "Time per-query re-ranking for every system on a common candidate "
+            "pool. Run this on an otherwise idle GPU: a contended device gives "
+            "a latency number that is not reportable."
+        ),
+    )
+    parser.add_argument(
+        "--latency-queries",
+        type=int,
+        default=200,
+        metavar="N",
+        help="Queries timed per dataset when --measure-latency is set.",
+    )
+    parser.add_argument(
+        "--latency-ce-batch",
+        type=int,
+        default=0,
+        help=(
+            "Cross-encoder batch size during timing. 0 (default) scores each "
+            "candidate pool in a single batch, matching the single forward "
+            "GARDIAN gets, so the baseline is not throttled by a bulk-ingest "
+            "batch size."
+        ),
+    )
+    parser.add_argument(
+        "--latency-warmup",
+        type=int,
+        default=10,
+        help="Queries discarded before timing starts (allocator/autotuner warmup).",
+    )
+    parser.add_argument(
         "--cfg",
         type=str,
         default="configs/base.yaml",
@@ -564,11 +881,15 @@ def main() -> None:
         datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
 
     ce_variants = list(FAST_CE_VARIANTS if args.fast else DEFAULT_CE_VARIANTS)
+    if args.no_cross_encoders:
+        ce_variants = []
+        logger.info("--no-cross-encoders: evaluating hybrid / RRF / GARDIAN only")
     if args.ce_tags:
         allowed = {t.strip() for t in args.ce_tags.split(",") if t.strip()}
         ce_variants = [v for v in ce_variants if v["tag"] in allowed]
-        if not ce_variants:
-            raise SystemExit(f"No CE variants matched --ce-tags {args.ce_tags!r}")
+
+    if not ce_variants and not args.no_cross_encoders:
+        raise SystemExit(f"No CE variants matched --ce-tags {args.ce_tags!r}")
 
     all_jobs = []
     for r in retrievers:

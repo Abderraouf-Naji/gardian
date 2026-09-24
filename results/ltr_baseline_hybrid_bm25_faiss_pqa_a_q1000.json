@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "created_utc": "2026-09-20T14:03:47.752285+00:00",
+    "script": "scripts/run_ltr_baseline.py",
+    "lightgbm_version": "4.7.0",
+    "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+    "python_version": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "dropped_features": [],
+    "seed": 42
+  },
+  "results": {
+    "hybrid_bm25_faiss": {
+      "retriever": "hybrid_bm25_faiss",
+      "n_features": 16,
+      "n_trees": 475,
+      "best_iteration": -1,
+      "train_wall_clock_sec": null,
+      "train_queries": null,
+      "loaded_from_saved_model": true,
+      "model_size_bytes": 3388144,
+      "model_path": "results/ltr_lambdamart_hybrid_bm25_faiss.txt",
+      "feature_gain_fraction": [
+        0.005075232241866131,
+        0.043406757304284595,
+        0.02180950411549647,
+        0.00533861567675438,
+        0.096394450526768,
+        0.06190162028742748,
+        0.005817576389334281,
+        0.00045947892131102506,
+        0.0027519011465493575,
+        0.012746711819890507,
+        0.01941494491231871,
+        0.5926280742218091,
+        0.06048700000822901,
+        0.06318875631648813,
+        0.007421924303107458,
+        0.0011574518083654396
+      ],
+      "results": {
+        "pubmedqa_artificial": {
+          "split": "test",
+          "n_queries": 1000,
+          "metrics": {
+            "ndcg@5": 0.7694096402342236,
+            "ndcg@10": 0.801748523247186,
+            "ndcg@20": 0.8236681456033584,
+            "mrr": 0.911006361056428,
+            "recall@10": 0.8465166666666667,
+            "recall@20": 0.9106833333333333,
+            "hit@10": 0.984
+          },
+          "latency_ms": {
+            "p50_ms": 6.0065909929107875,
+            "mean_ms": 6.632261136255693,
+            "p95_ms": 9.535573059110902,
+            "n": 200
+          }
+        }
+      },
+      "hyperparameters": {
+        "objective": "lambdarank",
+        "n_estimators": 1000,
+        "learning_rate": 0.05,
+        "num_leaves": 63,
+        "min_child_samples": 20,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "early_stopping_rounds": 50,
+        "seed": 42,
+        "n_jobs": 8
+      }
+    }
+  }
+}

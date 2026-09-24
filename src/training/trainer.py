@@ -66,6 +66,7 @@ class StreamingRankDataset(IterableDataset):
         group_size: int = 64,
         dropped_features: Optional[Sequence[str]] = None,
         emit_pool_features: bool = False,
+        emit_query_emb: bool = True,
     ):
         if mode not in ("pairs", "groups"):
             raise ValueError(f"mode must be 'pairs' or 'groups', got {mode!r}")
@@ -75,6 +76,13 @@ class StreamingRankDataset(IterableDataset):
         # query group inside the DataLoader workers, where data construction is
         # already the throughput bottleneck.
         self.emit_pool_features = bool(emit_pool_features)
+        # With the controller disabled (GARDIAN-Lite) the model never reads the
+        # query embedding, so loading the cache, precomputing misses and
+        # materialising a 768-d vector per group is pure overhead. Gating it
+        # here is what makes "no controller means no query encoder" true of the
+        # training path as well as the inference path -- otherwise the measured
+        # training cost of the Lite arm includes work its model discards.
+        self.emit_query_emb = bool(emit_query_emb)
         # Rank JSONL always stores the full 8+8 schema; the model may consume a
         # subset, so columns are selected here rather than in the data.
         self.sparse_cols, self.dense_cols = active_feature_indices(dropped_features)
@@ -108,8 +116,21 @@ class StreamingRankDataset(IterableDataset):
                 else max(1, int(query_emb_cache_max_entries))
             ),
         )
-        self._load_query_emb_cache()
-        self._maybe_precompute_query_embeddings()
+        if self.emit_query_emb:
+            self._load_query_emb_cache()
+            self._maybe_precompute_query_embeddings()
+        else:
+            logger.info(
+                "Controller disabled: skipping query-embedding cache and precompute."
+            )
+
+    @property
+    def _zero_query_emb(self) -> np.ndarray:
+        cached = getattr(self, "_zero_qemb_cache", None)
+        if cached is None:
+            cached = np.zeros(int(self.query_feat_dim), dtype=np.float32)
+            self._zero_qemb_cache = cached
+        return cached
 
     def _emb_cache_get(self, qid: str):
         return self._emb_store.get(qid)
@@ -229,6 +250,8 @@ class StreamingRankDataset(IterableDataset):
         return self._query_encoder
 
     def _resolve_query_emb(self, rec: Dict):
+        if not self.emit_query_emb:
+            return self._zero_query_emb
         query_emb = rec.get("query_emb")
         if isinstance(query_emb, list) and len(query_emb) == int(self.query_feat_dim):
             return query_emb
@@ -623,6 +646,14 @@ class GARDIANTrainer:
         )
         if self.needs_pool_features:
             logger.info("Controller consumes pool features; emitting them per group")
+        # With no controller there is no consumer for the query embedding, so
+        # the encoder leaves the training path exactly as it leaves the
+        # inference path.
+        self.needs_query_emb = getattr(model, "controller", None) is not None
+        if not self.needs_query_emb:
+            logger.info(
+                "GARDIAN-Lite: no controller, so no query encoder in the training path"
+            )
         self.base_lr = float(cfg.training.lr)
         self.warmup_epochs = max(0, int(getattr(cfg.training, "warmup_epochs", 2)))
         self.min_lr_ratio = float(getattr(cfg.training, "min_lr_ratio", 0.05))
@@ -823,6 +854,7 @@ class GARDIANTrainer:
             group_size=self.group_size,
             dropped_features=self.dropped_features,
             emit_pool_features=self.needs_pool_features,
+            emit_query_emb=self.needs_query_emb,
         )
         # Forked workers inherit whatever the parent holds. The embedding cache
         # is a single shared float32 matrix, but the encoder is not needed once

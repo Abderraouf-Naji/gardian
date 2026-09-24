@@ -1,0 +1,85 @@
+{
+  "meta": {
+    "created_utc": "2026-09-20T14:12:43.813863+00:00",
+    "script": "scripts/14_compare_rerankers.py",
+    "retriever": "hybrid_bm25_faiss",
+    "device": "cuda",
+    "systems": [
+      "hybrid",
+      "rrf",
+      "gardian"
+    ],
+    "cross_encoder_variants": [],
+    "datasets": [
+      "pubmedqa_artificial"
+    ],
+    "max_queries": 1000,
+    "seed": 42,
+    "latency_measured": false,
+    "latency_queries": null,
+    "latency_warmup": null,
+    "latency_gpu_contention": null,
+    "gpu_name": "NVIDIA A40",
+    "torch_version": "2.6.0+cu124",
+    "args": {
+      "retriever": "hybrid_bm25_faiss",
+      "datasets": "pubmedqa_artificial",
+      "device": "auto",
+      "output": "results/reranker_comparison_hybrid_bm25_faiss_lite_pqa_a_q1000.json",
+      "skip_backfill": false,
+      "overwrite_ce": false,
+      "fast": false,
+      "eval_only": true,
+      "ce_tags": null,
+      "max_queries": 1000,
+      "gardian_results_dir": "results/gardian_lite",
+      "no_cross_encoders": true,
+      "seed": 42,
+      "measure_latency": false,
+      "latency_queries": 200,
+      "latency_ce_batch": 0,
+      "latency_warmup": 10,
+      "cfg": "configs/base.yaml"
+    }
+  },
+  "results": {
+    "pubmedqa_artificial": {
+      "hybrid": {
+        "metrics": {
+          "ndcg@10": 0.6504605952102238,
+          "ndcg@20": 0.6716337654932822,
+          "ndcg@50": 0.68609182495051,
+          "mrr": 0.8404415350887601,
+          "recall@10": 0.6712333333333333,
+          "recall@20": 0.7335666666666666,
+          "hit@10": 0.955
+        },
+        "latency_ms": {}
+      },
+      "rrf": {
+        "metrics": {
+          "ndcg@10": 0.721635099671287,
+          "ndcg@20": 0.7515397229025427,
+          "ndcg@50": 0.7777731275043768,
+          "mrr": 0.8857684114291954,
+          "recall@10": 0.7599,
+          "recall@20": 0.8475166666666667,
+          "hit@10": 0.971
+        },
+        "latency_ms": {}
+      },
+      "gardian": {
+        "metrics": {
+          "ndcg@10": 0.7913191609131208,
+          "ndcg@20": 0.8136780020208637,
+          "ndcg@50": 0.8313729672515731,
+          "mrr": 0.9113764510097115,
+          "recall@10": 0.8378499999999999,
+          "recall@20": 0.9030999999999999,
+          "hit@10": 0.986
+        },
+        "latency_ms": {}
+      }
+    }
+  }
+}

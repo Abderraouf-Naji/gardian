@@ -582,10 +582,20 @@ def load_checkpoint_state(
     inventing weights would silently produce a different model.
     """
     filtered: Dict[str, torch.Tensor] = {}
-    expected_in = int(model.controller.net[0].weight.shape[1])
+    # A GARDIAN-Lite model (use_controller=False) has no controller at all, so
+    # there is no first layer to widen or narrow and nothing to reconcile.
+    expected_in = (
+        int(model.controller.net[0].weight.shape[1])
+        if model.controller is not None
+        else None
+    )
 
     for key, value in state_dict.items():
-        if key == "controller.net.0.weight" and value.ndim == 2:
+        if key.startswith("controller.") and model.controller is None:
+            # Loading a controller-trained checkpoint into a Lite model would
+            # otherwise fail on unexpected keys under strict=True.
+            continue
+        if key == "controller.net.0.weight" and expected_in is not None and value.ndim == 2:
             got_in = int(value.shape[1])
             if got_in > expected_in:
                 value = value[:, :expected_in].contiguous()

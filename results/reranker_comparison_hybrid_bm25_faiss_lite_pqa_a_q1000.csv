@@ -1,0 +1,4 @@
+retriever,dataset,system,ndcg@10,ndcg@20,ndcg@50,mrr,recall@10,recall@20,hit@10
+hybrid_bm25_faiss,pubmedqa_artificial,hybrid,0.650461,0.671634,0.686092,0.840442,0.671233,0.733567,0.955000
+hybrid_bm25_faiss,pubmedqa_artificial,rrf,0.721635,0.751540,0.777773,0.885768,0.759900,0.847517,0.971000
+hybrid_bm25_faiss,pubmedqa_artificial,gardian,0.791319,0.813678,0.831373,0.911376,0.837850,0.903100,0.986000

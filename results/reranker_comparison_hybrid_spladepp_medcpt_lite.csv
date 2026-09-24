@@ -1,0 +1,7 @@
+retriever,dataset,system,ndcg@10,ndcg@20,ndcg@50,mrr,recall@10,recall@20,hit@10
+hybrid_spladepp_medcpt,pubmedqa_labeled,hybrid,0.913684,0.929937,0.938670,0.991618,0.919707,0.963436,0.999000
+hybrid_spladepp_medcpt,pubmedqa_labeled,rrf,0.903503,0.921580,0.929774,0.987769,0.914674,0.963452,0.999000
+hybrid_spladepp_medcpt,pubmedqa_labeled,gardian,0.909700,0.925768,0.934884,0.989751,0.920440,0.963612,0.998000
+hybrid_spladepp_medcpt,medmcqa,hybrid,0.436057,0.451903,0.461715,0.382624,0.632705,0.694739,0.632705
+hybrid_spladepp_medcpt,medmcqa,rrf,0.429393,0.456720,0.472526,0.369229,0.656851,0.764232,0.656851
+hybrid_spladepp_medcpt,medmcqa,gardian,0.478013,0.499754,0.514270,0.420232,0.690224,0.775618,0.690224

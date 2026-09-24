@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # RQ3 end-to-end matrix at n=1000.
 #
-#   2 back-ends x 2 readers x 3 datasets, RRF (hybrid) vs GARDIAN only.
+#   2 back-ends x 3 readers x 3 datasets, RRF (hybrid) vs GARDIAN only.
 #
 # Scope decisions behind this file:
 #   * systems=hybrid,gardian -- the sparse/dense channel rows double reader cost
@@ -26,7 +26,11 @@ LOGDIR=logs/rq3_1k
 mkdir -p "$OUTDIR" "$LOGDIR"
 
 declare -a BACKENDS=(hybrid_bm25_faiss hybrid_spladepp_medcpt)
-declare -a READERS=("meta-llama/Meta-Llama-3-8B-Instruct:Llama3-8B" "Qwen/Qwen2.5-14B-Instruct:Qwen14B")
+declare -a READERS=(
+  "Qwen/Qwen2.5-7B-Instruct:Qwen7B"
+  "Qwen/Qwen2.5-14B-Instruct:Qwen14B"
+  "Qwen/Qwen2.5-32B-Instruct:Qwen32B"
+)
 
 for be in "${BACKENDS[@]}"; do
   for entry in "${READERS[@]}"; do

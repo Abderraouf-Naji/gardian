@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "created_utc": "2026-09-20T14:04:05.633382+00:00",
+    "script": "scripts/run_ltr_baseline.py",
+    "lightgbm_version": "4.7.0",
+    "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+    "python_version": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "dropped_features": [],
+    "seed": 42
+  },
+  "results": {
+    "hybrid_spladepp_medcpt": {
+      "retriever": "hybrid_spladepp_medcpt",
+      "n_features": 16,
+      "n_trees": 310,
+      "best_iteration": -1,
+      "train_wall_clock_sec": null,
+      "train_queries": null,
+      "loaded_from_saved_model": true,
+      "model_size_bytes": 2213067,
+      "model_path": "results/ltr_lambdamart_hybrid_spladepp_medcpt.txt",
+      "feature_gain_fraction": [
+        0.004673403753625585,
+        0.015965650278988035,
+        0.007256952810971327,
+        0.027382548776715268,
+        0.11690052474849945,
+        0.04870464025249997,
+        0.003911099717888401,
+        0.00031588028931161887,
+        0.0015129596424667622,
+        0.0050488577631594795,
+        0.000601550830246801,
+        0.6474713936297772,
+        0.08378337491497453,
+        0.02509590364226825,
+        0.008460482315230012,
+        0.0029147766333773076
+      ],
+      "results": {
+        "pubmedqa_artificial": {
+          "split": "test",
+          "n_queries": 1000,
+          "metrics": {
+            "ndcg@5": 0.7674198278919975,
+            "ndcg@10": 0.8053935663327366,
+            "ndcg@20": 0.8292123584289887,
+            "mrr": 0.9300071912266232,
+            "recall@10": 0.8386333333333333,
+            "recall@20": 0.9084166666666667,
+            "hit@10": 0.984
+          },
+          "latency_ms": {
+            "p50_ms": 11.99915201868862,
+            "mean_ms": 13.241477244591806,
+            "p95_ms": 20.908921674708782,
+            "n": 200
+          }
+        }
+      },
+      "hyperparameters": {
+        "objective": "lambdarank",
+        "n_estimators": 1000,
+        "learning_rate": 0.05,
+        "num_leaves": 63,
+        "min_child_samples": 20,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "early_stopping_rounds": 50,
+        "seed": 42,
+        "n_jobs": 8
+      }
+    }
+  }
+}

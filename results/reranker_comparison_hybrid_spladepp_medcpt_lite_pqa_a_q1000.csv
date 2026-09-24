@@ -1,0 +1,4 @@
+retriever,dataset,system,ndcg@10,ndcg@20,ndcg@50,mrr,recall@10,recall@20,hit@10
+hybrid_spladepp_medcpt,pubmedqa_artificial,hybrid,0.761853,0.793944,0.814486,0.913275,0.792133,0.883833,0.980000
+hybrid_spladepp_medcpt,pubmedqa_artificial,rrf,0.760122,0.789962,0.809526,0.907072,0.799550,0.885167,0.981000
+hybrid_spladepp_medcpt,pubmedqa_artificial,gardian,0.789471,0.811934,0.831098,0.924137,0.831133,0.896417,0.983000

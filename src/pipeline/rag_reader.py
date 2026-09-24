@@ -1091,8 +1091,20 @@ def load_hf_reader(
             model.eval()
             _sanitize_reader_generation_config(model)
             return model
-        model = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype)
-        model.to(device)
+        # Stream shards onto the GPU. from_pretrained + .to(cuda) materializes
+        # the full fp16 checkpoint in CPU RAM first (~28GB for Qwen-14B), which
+        # OOMs this 32GB host (systemd-oomd / kernel OOM killer).
+        if str(device).startswith("cuda"):
+            map_dev = "cuda:0" if device == "cuda" else device
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                dtype=dtype,
+                device_map=map_dev,
+                low_cpu_mem_usage=True,
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype)
+            model.to(device)
         model.eval()
         _sanitize_reader_generation_config(model)
         return model
