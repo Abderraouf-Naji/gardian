@@ -379,13 +379,17 @@ A complete reproduction additionally requires data downloads, model downloads, i
 | Different offline and live rankings | Check corpus routing, IDF, feature mode, encoder, checkpoint, and candidate pool before interpreting scores. |
 | Aggregate seed count too small | Complete missing seed runs/evaluations, then aggregate again. |
 
-## Scope and limitations
+## Findings and limitations
 
-GARDIAN is research software for biomedical information retrieval and QA experiments. It is not a validated clinical decision system. Generated answers and citations require independent review.
+The experiments support learning separate lexical and semantic relevance scores: GARDIAN improves nDCG@10 over RRF in all 12 retrieval settings and over a development-tuned global weight in 10. Query-specific weighting adds comparatively little, with a fixed weight over the learned branches remaining within 0.7 nDCG@10 points. LambdaMART performs better in five of the six tested comparisons and costs less to train and run. GARDIAN therefore provides evidence for learned feature-based fusion, while the controller's added complexity offers limited benefit in these experiments.
 
-Learned reranking gains and gains from the query-adaptive controller are separate questions. The saved fusion ablations compare the full model with a dev-fitted fixed weight over the same learned branches. Use those rows to assess the contribution of per-query weighting, and use the saved LambdaMART comparisons to assess the choice of learned scorer.
+Candidate coverage sets a hard limit on reranking. GARDIAN can reorder retrieved passages but cannot introduce missing evidence; 12–16% of MedMCQA questions have no annotated gold passage in their candidate pool. Incomplete annotations also limit what retrieval and citation scores can establish. Citation agreement with the gold set does not independently demonstrate that the cited passage supports the generated answer.
 
-The repository contains historical experiment outputs alongside newer runs. Dataset-derived gold evidence can be incomplete, evaluation populations can differ, and retrieval improvements do not guarantee better generated answers. Report the exact artifact, protocol, and uncertainty used for each claim.
+Retrieval evaluation covers two English biomedical benchmarks, three evaluation sets, and four hybrid backends. The end-to-end study covers two backends and three frozen Qwen2.5 readers, using a single GARDIAN checkpoint and the first 1,000 questions in each evaluation file. This sampling and the absence of a closed-book control limit conclusions about generalisation and the reader's reliance on retrieved evidence. PubMedQA accuracy improves in 11 of 12 configurations, but MedMCQA accuracy does not improve despite better evidence retrieval. Results with other reader families, languages, or clinical records remain untested.
+
+The cross-encoder comparison also differs in training conditions: GARDIAN and LambdaMART learn from the biomedical training data, whereas the cross-encoders are used without in-domain training. On PubMedQA with SPLADE++ + MedCPT, GARDIAN is competitive with the tested cross-encoders at lower reranking latency; the strongest cross-encoders retain an advantage on MedMCQA. These findings do not establish clinical readiness, which would require clinician-led evaluation on realistic patient queries and monitoring workflows.
+
+Further work will examine retriever-confidence features, passage-level fusion decisions, and additional biomedical evidence signals.
 
 ## License
 
