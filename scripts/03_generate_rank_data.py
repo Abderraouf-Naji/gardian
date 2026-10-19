@@ -239,31 +239,9 @@ def validate_query_record(rec: dict, dataset_name: str, idx: int) -> dict:
     rec["question_type"] = normalize_question_type(rec.get("question_type", "other"))
     return rec
 
-def build_idf_table(corpus_jsonl: str) -> Dict[str, float]:
-    """Build IDF table from corpus for sparse features."""
-    import re
-    
-    logger.info(f"Building IDF table from {corpus_jsonl} ...")
-    df = Counter()
-    n_docs = 0
+# Shared with the live QA path so both build the IDF feature identically.
+from src.features.idf import build_idf_table  # noqa: E402
 
-    with open(corpus_jsonl, "r", encoding="utf-8", errors="ignore") as f:
-        for line in tqdm(f, desc="IDF corpus scan"):
-            if not line.strip():
-                continue
-            rec = json.loads(line)
-            text = rec.get("text", "")
-            toks = set(re.findall(r"[a-z0-9]+", text.lower()))
-            for t in toks:
-                df[t] += 1
-            n_docs += 1
-
-    idf = {}
-    for tok, freq in df.items():
-        idf[tok] = math.log((n_docs + 1) / (freq + 1)) + 1.0
-
-    logger.success(f"Built IDF table with {len(idf)} terms over {n_docs:,} docs")
-    return idf
 
 def deduplicate_candidates(candidates: List[Dict], max_candidates: int) -> List[Dict]:
     seen = set()

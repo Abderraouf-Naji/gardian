@@ -473,6 +473,7 @@ def _enrich_live_candidates_for_gardian(
     encoder,
     faiss_lookup=None,
     medcpt_encoder=None,
+    idf_table=None,
 ) -> Tuple[List[float], List[float]]:
     """
     Attach sparse/dense branch features; return the controller query embedding.
@@ -502,7 +503,7 @@ def _enrich_live_candidates_for_gardian(
         question=question,
         candidates=candidates,
         retriever_type=retriever_name,
-        idf_table=None,
+        idf_table=idf_table,
         q_dense=q_dense,
         p_embs=p_embs,
     )
@@ -684,6 +685,7 @@ def evaluate_qa_live(
     gardian_adaptive_retrieval: bool = False,
     pubmedqa_rag_mode: Optional[str] = None,
     gold_passage_lookup: Optional[Dict[str, str]] = None,
+    idf_table: Optional[Dict[str, float]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, List[Dict[str, Any]]]]:
     """
     QA eval with live hybrid retrieval → GARDIAN rerank → RAG reader.
@@ -696,7 +698,17 @@ def evaluate_qa_live(
 
     ``pubmedqa_rag_mode=gold_context`` (PubMedQA only): reader sees labeled abstract(s)
     from ``gold_passage_lookup`` — the standard PubMedQA setting, not open-domain retrieval.
+
+    ``idf_table`` must be the corpus IDF table the offline rank data was built
+    with (:func:`src.features.idf.build_idf_table`). Without it the IDF-weighted
+    overlap feature falls back to ``log(1 + overlap count)`` and GARDIAN scores
+    different features from the ones it was trained and evaluated on.
     """
+    if "gardian" in systems and gardian_model is not None and not idf_table:
+        raise ValueError(
+            "evaluate_qa_live: GARDIAN needs the corpus idf_table so live features "
+            "match the offline rank data (see src/features/idf.py)."
+        )
     if "doc2query" in systems:
         logger.warning("doc2query is not supported with live retrieval; skipping that system.")
         systems = [s for s in systems if s != "doc2query"]
@@ -866,6 +878,7 @@ def evaluate_qa_live(
                 encoder=encoder,
                 faiss_lookup=faiss_lookup,
                 medcpt_encoder=medcpt_encoder,
+                idf_table=idf_table,
             )
             gardian_ranked = gardian_model.rerank(
                 candidates=candidates,

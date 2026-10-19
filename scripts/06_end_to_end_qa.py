@@ -49,6 +49,7 @@ from src.evaluation.pubmedqa_rag import (
     resolve_pubmedqa_rag_mode,
 )
 from src.evaluation.qa_eval import evaluate_qa_from_rank_records, evaluate_qa_live
+from src.features.idf import build_idf_table
 from src.model.gardian import build_gardian_from_model_cfg, load_checkpoint_state
 from src.pipeline.rank_dense_features import (
     FaissPassageEmbeddingLookup,
@@ -980,6 +981,16 @@ def _eval_all_datasets(
                     logger.warning(
                         f"pubmedqa_rag_mode=gold_context but corpus missing: {corpus_p}"
                     )
+            # Same corpus IDF table as scripts/03 used for the offline rank data,
+            # so the live IDF-weighted overlap feature matches what GARDIAN saw.
+            idf_table = None
+            if "gardian" in systems and gardian_model is not None:
+                idf_corpus = _DATASET_PASSAGE_CORPUS.get(dataset_name)
+                if idf_corpus is None or not idf_corpus.is_file():
+                    raise FileNotFoundError(
+                        f"Corpus for the {dataset_name} IDF table not found: {idf_corpus}"
+                    )
+                idf_table = build_idf_table(str(idf_corpus))
             from sentence_transformers import SentenceTransformer
 
             # Controller query_emb for GARDIAN rerank (required even in PubMedQA gold_context).
@@ -1017,6 +1028,7 @@ def _eval_all_datasets(
                 gardian_adaptive_retrieval=_gardian_adaptive_flag(cfg, args),
                 pubmedqa_rag_mode=pmqa_mode,
                 gold_passage_lookup=gold_lookup,
+                idf_table=idf_table,
             )
             if live_stack is not None:
                 datasets_payload.setdefault("_retrieval_paths", {})[dataset_name] = (
