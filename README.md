@@ -1,10 +1,8 @@
-# GARDIAN
+# GARDIAN: Learned Fusion of Sparse and Dense Evidence for Biomedical RAG
 
-**Query-adaptive sparse–dense reranking for biomedical retrieval and retrieval-augmented question answering.**
+GARDIAN learns passage relevance from the evidence produced by sparse and dense retrievers. Two scoring branches transform retrieval features into relevance scores, and a query-level controller combines them. The resulting ranking supplies the evidence for a frozen language-model reader, without running a cross-encoder over every query–passage pair.
 
-GARDIAN retrieves a candidate pool from sparse and dense search engines, builds evidence features, and learns how to rank the passages for each question. An optional language-model reader answers using the highest-ranked passages and passage citations.
-
-This repository contains the research workflow: dataset preparation, index construction, ranking-data generation, training, retrieval evaluation, end-to-end QA, ablations, efficiency measurements, and result reporting. It also includes saved checkpoints and experiment artifacts under `results/`. Large datasets and retrieval indices are generated locally and are excluded from Git.
+This repository documents the completed PubMedQA and MedMCQA experiments saved in `results/`: four hybrid retrieval backends, five-seed training and retrieval evaluation, fusion ablations, LambdaMART and cross-encoder comparisons, end-to-end QA, and cost measurements. The main experimental distinction is between learning the branch scores and choosing their fusion weight; both are evaluated in the saved artifacts.
 
 ## Contents
 
@@ -14,7 +12,6 @@ This repository contains the research workflow: dataset preparation, index const
 - [Data and retrieval backends](#data-and-retrieval-backends)
 - [Complete training and evaluation workflow](#complete-training-and-evaluation-workflow)
 - [End-to-end question answering](#end-to-end-question-answering)
-- [Interactive questions and local server](#interactive-questions-and-local-server)
 - [Experiments and saved results](#experiments-and-saved-results)
 - [Configuration](#configuration)
 - [Validation and tests](#validation-and-tests)
@@ -24,24 +21,17 @@ This repository contains the research workflow: dataset preparation, index const
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    Q[Biomedical question] --> S[Sparse retrieval: BM25 or SPLADE++]
-    Q --> D[Dense retrieval: FAISS or MedCPT]
-    S --> U[Union of candidate passages]
-    D --> U
-    U --> F[Sparse and dense feature extraction]
-    F --> SB[Sparse branch MLP]
-    F --> DB[Dense branch MLP]
-    Q --> E[Query embedding]
-    E --> C[Controller: query-specific fusion weights]
-    SB --> R[Weighted score and reranking]
-    DB --> R
-    C --> R
-    R --> K[Top-ranked passages]
-    K --> M[Optional LLM reader]
-    M --> A[Answer with passage citations]
-```
+### Offline training
+
+![GARDIAN offline training: frozen retrieval, sparse and dense scoring branches, query controller, and listwise LambdaRank objective](docs/images/gardian-offline-training.png)
+
+Candidate pools and features are prepared once for each hybrid backend. Training groups retain the positives and sample negatives to form groups of 64 candidates. The two relevance branches and controller are trained jointly with LambdaRank at cutoff 10.
+
+### Online inference
+
+![GARDIAN online inference: shared retrieval pool, learned score fusion, top-10 passages, and frozen reader](docs/images/gardian-online-inference.png)
+
+Each channel retrieves its top 50 passages, forming a union of up to 100 candidates. GARDIAN scores the stored first-stage features and combines the learned branch outputs using one set of weights per query. The top 10 passages are passed to the reader in rank order. The controller uses a mean-pooled query embedding; candidates are not cross-encoded with the query.
 
 For a query `q` and candidate passage `p`, the default model computes:
 
@@ -67,7 +57,7 @@ The current feature schema stores **8 sparse + 8 dense features** per candidate:
 | Score dispersion | Score dispersion |
 | Retrieved-by-sparse indicator | Retrieved-by-dense indicator |
 
-See [`src/features/schema.py`](src/features/schema.py) for the exact ordering and missing-score handling. Question type is an analysis label, **not a model input**. Optional controller inputs and branch normalization support ablation experiments; the default controller uses the query embedding.
+See [`src/features/schema.py`](src/features/schema.py) for the exact ordering and missing-score handling. Question type is an analysis label, **not a model input**. The reported configuration uses the query embedding as the controller input and leaves branch-output normalization disabled.
 
 ## Installation
 
@@ -88,11 +78,11 @@ python -m pip install -r requirements.txt
 python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA available:', torch.cuda.is_available())"
 ```
 
-The requirements include Transformers, Sentence Transformers, datasets, BM25S, CPU FAISS, OmegaConf, and plotting/test utilities. `bitsandbytes` supports the optional 4-bit reader path on compatible systems. Native GPU FAISS is optional and is not provided by `faiss-cpu`.
+The requirements include Transformers, Sentence Transformers, datasets, BM25S, CPU FAISS, OmegaConf, and plotting/test utilities. `bitsandbytes` is used for the saved 4-bit 32B-reader rerun. The documented QA runs keep FAISS on CPU.
 
 Models and datasets download from Hugging Face when needed. If a selected model is gated, obtain access and authenticate your environment before running it. Keep tokens out of source files and commits.
 
-Use the scripts below directly from this checkout. The packaging metadata declares a `gardian-rerank` entry point, but its target module is absent in this snapshot; it is not the documented execution path.
+Use the scripts below directly from the repository root.
 
 ## Repository layout
 
@@ -122,8 +112,6 @@ gardian/
 
 The primary QA collections are PubMedQA labeled, PubMedQA artificial, and MedMCQA. MedRAG/PubMed supplies additional passages for corpus preparation. The preparation script targets a unified corpus of **3 million passages**; actual output depends on available and accepted source records. Inspect the generated report rather than assuming the target was reached.
 
-Optional BEIR conversion supports TREC-COVID, NFCorpus, and SciFact. TREC-COVID is used as an explicit evaluation-only collection and is excluded from the default QA training collections.
-
 | CLI retriever name | Sparse channel | Dense channel |
 | --- | --- | --- |
 | `hybrid_bm25_faiss` | BM25 | FAISS over biomedical sentence embeddings |
@@ -144,16 +132,6 @@ python scripts/00_download_data.py
 ```
 
 This creates local corpus and QA JSONL files under `data/`, including per-collection corpora and a unified corpus. Passage records carry identifiers and text; question records carry question/answer information and gold passage IDs used for supervision.
-
-Optional BEIR collections are downloaded separately:
-
-```bash
-python scripts/00b_download_beir.py --dataset trec_covid
-python scripts/00b_download_beir.py --dataset nfcorpus --stats-only
-python scripts/00b_download_beir.py --dataset scifact
-```
-
-`--stats-only` inspects label density without writing converted corpus/query files. BEIR conversion preserves relevance grades when available.
 
 ### 2. Build retrieval indices
 
@@ -176,12 +154,6 @@ For experiments using SPLADE++ or MedCPT:
 python scripts/01_build_spladepp_medcpt_indices.py --dataset all --only all
 ```
 
-Optional collections require explicit index commands, for example:
-
-```bash
-python scripts/01_build_bm25_faiss_indices.py --dataset trec_covid
-```
-
 ### 3. Generate ranking data
 
 Start with one hybrid family:
@@ -201,7 +173,7 @@ data/hybrid_bm25_faiss/rank_data_hybrid_bm25_faiss_<dataset>_<split>.jsonl
 
 Use `--retriever all` to generate all four hybrid families after building their indices. `--dataset` restricts the collection. `--max-queries` supports small development runs, but writes canonical paths; the script refuses substantial shrinking of an existing file unless explicitly allowed.
 
-Keep full dense features for reproducibility. `--dense-from-retriever-scores` is a shortcut that changes the feature computation. Corpus IDF is shared through `src/features/idf.py` so offline and live QA features agree.
+Ranking data uses the full dense feature computation. Corpus IDF is shared through `src/features/idf.py` so offline and live QA features agree.
 
 ### 4. Train GARDIAN
 
@@ -228,14 +200,6 @@ results/seeds/seed_42/gardian_best_hybrid_bm25_faiss.pt
 results/seeds/seed_42/gardian_training/hybrid_bm25_faiss/
 ```
 
-Useful overrides include `--epochs`, `--lr`, `--num-workers`, `--loss`, and `--train-datasets`. For an isolated experiment:
-
-```bash
-python scripts/04_train_gardian.py \
-  --retriever hybrid_bm25_faiss --seeds 42 \
-  --results-dir results/experiments/my_run
-```
-
 ### 5. Evaluate retrieval
 
 Evaluation reuses precomputed candidate pools instead of rebuilding the indices:
@@ -257,40 +221,31 @@ Outputs under `results/aggregated/` include retrieval metrics and training summa
 
 Metrics include nDCG, MRR, recall, and Hit@k. Use the full source relevance judgments and the population recorded in the output when comparing runs. Historical notes and artifacts can use different populations or binary/graded gains. Oracle-alpha uses evaluation labels and is a diagnostic ceiling, not a deployable baseline.
 
-To evaluate TREC-COVID, first generate its rank data, then explicitly select it:
-
-```bash
-python scripts/03_generate_rank_data.py \
-  --retriever hybrid_bm25_faiss --dataset trec_covid --no-faiss-gpu
-python scripts/05_evaluate_gardian.py \
-  --retriever hybrid_bm25_faiss --datasets trec_covid --seeds 42
-```
-
 ## End-to-end question answering
 
 The controlled QA comparison gives hybrid RRF and GARDIAN the same candidate pool and reader, with 10 passages sent to the reader. The `--rq4` flag retains its historical name even though some newer reporting scripts call the end-to-end matrix RQ3.
 
-After preparing per-dataset indices and a matching checkpoint, run a small live evaluation:
+The saved end-to-end matrix uses Qwen2.5 7B, 14B, and 32B readers with BM25+FAISS and SPLADE+++MedCPT. Llama-3-8B result files are also present in the original matrix. Each requested dataset is capped at 1,000 questions. For example, the corrected BM25+FAISS 7B GARDIAN run is reproduced with:
 
 ```bash
 python scripts/06_end_to_end_qa.py \
-  --rq4 --systems hybrid,gardian \
+  --rq4 --systems gardian \
   --online-retrieval --pubmedqa-open-domain \
   --gardian-adaptive-retrieval --faiss-cpu \
   --retriever hybrid_bm25_faiss \
   --reader-models Qwen/Qwen2.5-7B-Instruct \
-  --datasets pubmedqa_labeled,medmcqa \
-  --max-questions 20 --top-k-passages 10 --seed 42 \
+  --datasets pubmedqa_labeled,pubmedqa_artificial,medmcqa \
+  --max-questions 1000 --top-k-passages 10 --seed 42 \
   --checkpoint-every-dataset \
-  --out results/qa_example_bm25_faiss_qwen7b_n20.json
+  --out results/rq3_1k_fixidf/qa_hybrid_bm25_faiss_Qwen7B_n1000.json
 ```
 
-This is a workflow check, not a statistically reliable benchmark. Increase the question count for reported experiments. Add `--load-in-4bit` for a compatible quantized reader setup when needed. Omitting `--online-retrieval` uses precomputed rank data instead.
+The corrected 7B and 14B files contain GARDIAN results; compare them with the matching hybrid rows in the original matrix. The corrected 32B file contains both hybrid and GARDIAN with the same quantized reader. Inspect each file’s metadata and system coverage when assembling comparisons.
 
 Important protocol details:
 
 - `--pubmedqa-open-domain` evaluates retrieval-based QA. The configured default `gold_context` supplies the source abstract and answers a different benchmark question.
-- Rank-data mode and live index routing must match. Default ranking-data generation is per-corpus; `--unified-indices` is a separate live ablation.
+- Rank-data mode and live index routing must match; these commands use per-corpus preparation and per-dataset live retrieval.
 - With `rq4_full_union_pool: true`, enabling adaptive fusion keeps the full union candidate pool; it does not shrink it to adaptive channel budgets.
 - Online GARDIAN evaluation requires the matching corpus IDF table. Missing or empty IDF input raises an error rather than silently substituting different features.
 - Keep reader, context size, candidate pool, model precision, prompt, and question sample identical when comparing systems.
@@ -307,62 +262,63 @@ bash scripts/run_rq3_rerun_bm25_gardian.sh
 
 QA outputs contain aggregate metrics and per-question records. Answer accuracy and gold evidence in context link retrieval to reader behavior. Citation metrics depend on dataset gold IDs; they measure evidence-ID alignment rather than independent clinical fact verification. MedMCQA reporting emphasizes answer accuracy.
 
-## Interactive questions and local server
-
-The interactive scripts use the configured live retrieval stack and need its indices and checkpoint. The BM25/FAISS demo path uses unified indices, unlike the default per-dataset QA benchmark. Demo behavior should be validated separately before comparing it with controlled evaluation results.
-
-Retrieve and rerank one question without loading an LLM:
-
-```bash
-python scripts/08_ask_gardian.py \
-  --question "What are common treatments for type 2 diabetes?" \
-  --retriever hybrid_bm25_faiss --no-reader --pretty
-```
-
-Omit `--no-reader` to generate an answer with the configured reader, or use `--interactive` to keep models loaded between questions.
-
-A persistent local server and client are also provided:
-
-```bash
-# Terminal 1: load models once and serve locally.
-python scripts/11_run_gardian_server.py --host 127.0.0.1 --port 8787
-
-# Terminal 2: submit a question.
-python scripts/11_ask_gardian_live.py \
-  --question "What are common treatments for type 2 diabetes?" --pretty
-```
-
-The server also accepts `--no-reader` for ranking-only requests. Reader defaults come from `qa` in the configuration, including model access and memory requirements.
-
 ## Experiments and saved results
 
-| Purpose | Entry points / artifacts |
+### Retrieval evaluation
+
+The table below is transcribed from [`results/aggregated/retrieval_metrics.csv`](results/aggregated/retrieval_metrics.csv). Values are **nDCG@10 means across five seeds** (13, 21, 42, 87, 100), rounded to four decimals. The CSV retains standard deviations and individual seed scores. RRF here is the artifact’s explicit `rrf` system; the separate `hybrid` row is not substituted for it.
+
+| Backend | Dataset | Dense | RRF | GARDIAN |
+| --- | --- | ---: | ---: | ---: |
+| BM25 + FAISS | PubMedQA labeled | 0.8922 | 0.8632 | 0.9066 |
+| BM25 + FAISS | PubMedQA artificial | 0.7095 | 0.7245 | 0.7920 |
+| BM25 + FAISS | MedMCQA | 0.3282 | 0.3941 | 0.4245 |
+| BM25 + MedCPT | PubMedQA labeled | 0.9132 | 0.8772 | 0.9166 |
+| BM25 + MedCPT | PubMedQA artificial | 0.7513 | 0.7541 | 0.8019 |
+| BM25 + MedCPT | MedMCQA | 0.3265 | 0.3984 | 0.4248 |
+| SPLADE++ + FAISS | PubMedQA labeled | 0.8922 | 0.8969 | 0.9127 |
+| SPLADE++ + FAISS | PubMedQA artificial | 0.7059 | 0.7519 | 0.7941 |
+| SPLADE++ + FAISS | MedMCQA | 0.3281 | 0.4373 | 0.4820 |
+| SPLADE++ + MedCPT | PubMedQA labeled | 0.9133 | 0.9035 | 0.9182 |
+| SPLADE++ + MedCPT | PubMedQA artificial | 0.7517 | 0.7543 | 0.8033 |
+| SPLADE++ + MedCPT | MedMCQA | 0.3265 | 0.4294 | 0.4797 |
+
+These are the values in the committed aggregate artifact. Historical summaries or paper tables may use another result selection; use the linked artifact and its protocol when citing this table.
+
+### Completed experiment artifacts
+
+| Experiment | Saved artifacts |
 | --- | --- |
-| Raw checkpoints and seed evaluations | `results/seeds/seed_<seed>/` |
-| Aggregate retrieval/training summaries | `results/aggregated/` |
-| Original end-to-end matrix | `results/rq3_1k/` |
-| Corrected BM25/FAISS IDF QA runs | `results/rq3_1k_fixidf/` |
-| Component/controller ablations | `scripts/10_paper_run.py`, `scripts/ablate_rq2.py` |
-| Fusion and fixed-alpha baselines | `scripts/run_fusion_baselines.py`, `scripts/global_alpha_metrics.py` |
-| Learning-to-rank baseline | `scripts/run_ltr_baseline.py` (requires optional `lightgbm`) |
-| Cross-encoder scoring/comparison | `scripts/13_backfill_cross_encoder_scores.py`, `scripts/14_compare_rerankers.py` |
-| QA tables and paired analysis | `scripts/report_rq3.py`, `scripts/e2e_qa_significance.py` |
-| Efficiency and index measurements | `scripts/run_retrieval_efficiency_suite.py`, `scripts/report_retrieval_index_sizes.py` |
-| Cost summaries and plots | `scripts/report_rq4_cost.py`, `scripts/plot_rq4_cost_tradeoff.py` |
-| Architecture/training/result plots | `scripts/plot_architecture.py`, `scripts/09_plot_training_curves.py`, other `plot_*.py` scripts |
+| Four-backend training and retrieval evaluation, five seeds | [`results/seeds/`](results/seeds/), [`results/aggregated/training_summary.csv`](results/aggregated/training_summary.csv), [`results/aggregated/retrieval_metrics.csv`](results/aggregated/retrieval_metrics.csv) |
+| Sparse/dense branch and fusion-weight ablations | [`results/aggregated/ablation_rq2.json`](results/aggregated/ablation_rq2.json), per-seed `ablation_hybrid_*.json` |
+| Fixed-fusion baselines | [`results/fusion_baselines_metrics.json`](results/fusion_baselines_metrics.json), [`results/global_alpha_metrics.json`](results/global_alpha_metrics.json), [`results/global_alpha_minmax_metrics.json`](results/global_alpha_minmax_metrics.json) |
+| LambdaMART on the same features | [`results/ltr_baseline_hybrid_bm25_faiss.json`](results/ltr_baseline_hybrid_bm25_faiss.json), [`results/ltr_baseline_hybrid_spladepp_medcpt.json`](results/ltr_baseline_hybrid_spladepp_medcpt.json), backend-specific seed files and saved tree models |
+| Cross-encoder quality and latency comparisons | [`results/reranker_comparison_hybrid_bm25_faiss.json`](results/reranker_comparison_hybrid_bm25_faiss.json), [`results/reranker_comparison_hybrid_spladepp_medcpt.json`](results/reranker_comparison_hybrid_spladepp_medcpt.json), matching CSVs and artificial-set subset files |
+| Frozen-reader QA matrix | [`results/rq3_1k/`](results/rq3_1k/) |
+| Corrected BM25+FAISS IDF QA runs | [`results/rq3_1k_fixidf/`](results/rq3_1k_fixidf/) |
+| Controller-free GARDIAN-Lite training | [`results/gardian_lite/`](results/gardian_lite/) |
+| Training cost and model-size measurements | [`results/rq4_cost_summary.json`](results/rq4_cost_summary.json), [`results/train_step_cost.json`](results/train_step_cost.json) |
+| Comparison and cost figures | [`results/figures/`](results/figures/) |
 
-Use each script's `--help` for its required inputs and options. Some analysis scripts require local corpora even when result JSON files are already present. Do not combine old and corrected QA files indiscriminately: preserve the retriever, reader, system coverage, precision, and protocol metadata when selecting results.
+The cost summary records an NVIDIA A40, PyTorch 2.6.0 with CUDA 12.4, 7,928,836 trainable GARDIAN parameters, and five-seed mean training times of roughly 98–102 minutes per backend. Latency comparisons are stored in the reranker comparison files; consult their timing scope, sample sizes, and GPU-contention metadata when comparing systems. Training cost, reranking latency, first-stage retrieval time, and reader generation time are separate measurements.
 
-Research notes provide additional context:
+The learned-score contribution is tested by holding the branches fixed and comparing per-query weights with a dev-fitted fixed weight. LambdaMART provides a trained control over the same features, while cross-encoders provide a different scoring approach over query–passage text. QA outputs retain per-question records and confidence intervals so evidence retrieval and answer behavior can be examined separately.
 
-- [Training objective and measured limitations](docs/OBJECTIVE.md)
-- [Question-type analysis](docs/QUESTION_TYPE.md)
-- [Reranking protocol audit](docs/GARDIAN_RERANK_AUDIT.md)
-- [Reader and citation diagnosis](docs/RAG_DIAGNOSIS.md)
-- [Historical end-to-end protocol notes](docs/RQ4_END_TO_END.md)
-- [TREC-COVID research notes](docs/TREC_COVID.md)
+### Reproduce the recorded analyses
 
-These notes document evolving experiments. Where an old example differs, use current script options and `configs/base.yaml`; for example, the current BEIR downloader is `00b_download_beir.py`, and the default training objective is LambdaRank rather than the older pairwise objective.
+After preparing the matching data and checkpoints:
+
+```bash
+# Branch and fusion-weight ablations across the configured seeds/backends.
+python scripts/10_paper_run.py --device cuda --parallel-workers 1 --cuda-devices 0
+
+# Read the corrected BM25+FAISS QA artifacts.
+python scripts/report_rq3.py results/rq3_1k_fixidf/*.json
+```
+
+The 7B/14B corrected files contain only the GARDIAN arm, so a paired report needs the matching original hybrid rows as well; do not treat a missing row as a zero result. Original and corrected 32B reader precision differs, which is why the corrected 32B run includes both arms.
+
+Implementation and experiment notes: [training objective](docs/OBJECTIVE.md), [question-type analysis](docs/QUESTION_TYPE.md), [reranking audit](docs/GARDIAN_RERANK_AUDIT.md), and [reader diagnosis](docs/RAG_DIAGNOSIS.md). Older notes describe earlier experiments; the committed result files and current configuration establish the scope of this README.
 
 ## Configuration
 
@@ -427,7 +383,7 @@ A complete reproduction additionally requires data downloads, model downloads, i
 
 GARDIAN is research software for biomedical information retrieval and QA experiments. It is not a validated clinical decision system. Generated answers and citations require independent review.
 
-Learned reranking gains and gains from the query-adaptive controller are separate questions. Existing analyses report limited or negative controller benefits in some settings, especially zero-shot transfer. Compare against dev-fitted fixed fusion weights and shared-pool baselines rather than assuming adaptivity always improves results. See `docs/OBJECTIVE.md` for the measured findings and their evaluation conditions.
+Learned reranking gains and gains from the query-adaptive controller are separate questions. The saved fusion ablations compare the full model with a dev-fitted fixed weight over the same learned branches. Use those rows to assess the contribution of per-query weighting, and use the saved LambdaMART comparisons to assess the choice of learned scorer.
 
 The repository contains historical experiment outputs alongside newer runs. Dataset-derived gold evidence can be incomplete, evaluation populations can differ, and retrieval improvements do not guarantee better generated answers. Report the exact artifact, protocol, and uncertainty used for each claim.
 
