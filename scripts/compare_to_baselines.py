@@ -8,7 +8,7 @@ framing survives.
 
 Reported per dataset:
 
-    GARDIAN vs Global-alpha   the comparison reviewer 2 asked for
+    GARDIAN vs Global-alpha   the strongest tuned non-adaptive fusion
     GARDIAN vs Group-alpha    if these tie, the controller is a type detector
     GARDIAN vs Oracle-alpha   NOT an upper bound on GARDIAN: oracle-alpha
                               constrains convex combinations of the two RAW
