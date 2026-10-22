@@ -49,7 +49,7 @@ CITE_RE = re.compile(r"\[P(\d+)\]")
 # --------------------------------------------------------------------------
 # Prompt variants
 # --------------------------------------------------------------------------
-# "baseline" is the prompt used for the submitted results, reproduced verbatim
+# "baseline" is the prompt used for the reported results, reproduced verbatim
 # from src/pipeline/rag/prompts.py so the A/B is honest.
 BASELINE = """You are answering a biomedical research question using ONLY the passages below.
 The passages are labeled [P1] through [P{k}] in the order they were ranked.
