@@ -4,8 +4,8 @@ Regenerate the Global-$\\alpha$ row of the paper's retrieval tables.
 
 ``results/global_alpha_metrics.json`` was an orphan: it is the source of the
 Global-$\\alpha$ column in Table~\\ref{tab:main}, but no script in the
-repository wrote it, so the strongest non-adaptive baseline -- the one three
-reviewers asked for -- could not be reproduced. This script writes that file,
+repository wrote it, so the strongest non-adaptive baseline could not be
+reproduced. This script writes that file,
 and adds the Hit@k that the evidence table needs and the original artifact
 lacked.
 
