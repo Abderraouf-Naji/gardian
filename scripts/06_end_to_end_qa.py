@@ -1125,7 +1125,7 @@ def main():
     args = parse_args()
     cfg0 = OmegaConf.load(args.cfg)
     # Question type is an analysis dimension only; it was removed as a model
-    # input (docs/QUESTION_TYPE.md), so the list lives under `evaluation`.
+    # input, so the list lives under `evaluation`.
     assert_cfg_question_types(cfg0.evaluation.question_types)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     results_dir = pathlib.Path(str(cfg0.paths.results_dir))
