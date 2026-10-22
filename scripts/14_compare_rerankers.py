@@ -494,8 +494,8 @@ def _measure_latency_for_dataset(
     # would split ~95 candidates into a dozen forward passes and report a
     # latency no sensible deployment would accept. The default here is one
     # batch per pool, which is the same courtesy GARDIAN gets -- its whole pool
-    # goes through in a single forward. Reviewers asked for the batch settings
-    # behind the reported latency, so the chosen value is recorded per system.
+    # goes through in a single forward. The batch setting behind the reported
+    # latency matters, so the chosen value is recorded per system.
     max_pool = max(len(p) for p in pools)
     timing_batch = int(ce_batch) if ce_batch and ce_batch > 0 else max_pool
     logger.info(
