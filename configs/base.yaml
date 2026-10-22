@@ -2,8 +2,8 @@
 # reported results come from the `seeds` list below, not from this value.
 seed: 42
 
-# Multi-seed protocol (reviewers 1/3/5: reported margins are as small as 0.1 pp,
-# so every trained component is run once per seed and aggregated with mean/std).
+# Multi-seed protocol (reported margins are as small as 0.1 pp, so every
+# trained component is run once per seed and aggregated with mean/std).
 # Raw per-seed artifacts: results/seeds/seed_<S>/  (never overwritten)
 # Aggregated mean/std:    results/aggregated/      (the only source for paper tables)
 seeds: [13, 21, 42, 87, 100]
@@ -98,7 +98,6 @@ model:
   # (MedMCQA) / 0.0231 (PubMedQA) and the 4 normalisations alone lose 0.0260 /
   # 0.0480. Importance ranking is a bad guide here -- the 4 normalisations carry
   # 77% of tree gain but score *below* the 2 raw scores, which carry 1.7%.
-  # See docs/OBJECTIVE.md.
   #
   # Selection happens when tensors are built, so changing this list needs a
   # re-train but never a re-run of scripts/03_generate_rank_data.py.
@@ -109,7 +108,7 @@ model:
   #                  THIS query's pool (agreement, peakedness, coverage);
   #                  see src/features/pool_features.py
   #
-  # query_emb alone was the CoopIS setting, and it is why per-query adaptivity
+  # query_emb alone was the original setting, and it is why per-query adaptivity
   # does not transfer: alpha becomes a function of query semantics fitted on
   # PubMedQA/MedMCQA embeddings, so on TREC-COVID it lands 0.02-0.20 below the
   # fitted optimum and the controller LOSES to a single dev-fitted alpha on
@@ -157,7 +156,6 @@ model:
   #   PubMedQA-artificial  +0.0025    MedMCQA  +0.0052    TREC-COVID  -0.0280
   # It is worth ~4.5% of its own headroom on the synthetic single-gold splits
   # and is actively harmful on the one collection with real NIST judgments.
-  # See docs/OBJECTIVE.md.
   use_controller: true
   # Branch and controller hidden width. 2048 gives ~7.9M trainable parameters
   # over 7-dimensional branch inputs, which is generous. This is a deliberate
@@ -183,7 +181,7 @@ training:
   # Swept over {3e-5, 1e-4, 3e-4, 1e-3, 3e-3} x {lambdarank, listnet} x 2 seeds.
   # 3e-5 is a transformer fine-tuning rate and these are from-scratch MLPs over
   # tabular features: it underfits badly. 1e-3 is the measured optimum; 3e-3
-  # diverged in 3 of 4 configurations. See docs/OBJECTIVE.md.
+  # diverged in 3 of 4 configurations.
   lr: 1.0e-3
   weight_decay: 1.5e-4
   margin: 1.0
@@ -194,8 +192,8 @@ training:
   #   lambdarank                -- pairwise logistic weighted by |delta nDCG@k|
   #   approxndcg                -- differentiable 1 - nDCG@k surrogate
   #   listnet                   -- softmax cross-entropy over the pool
-  #   pairwise_softplus_margin  -- softplus(gamma - (r_pos - r_neg)); the CoopIS
-  #                                submission, retained for the loss ablation
+  #   pairwise_softplus_margin  -- softplus(gamma - (r_pos - r_neg)); the original
+  #                                objective, retained for the loss ablation
   #
   # The margin loss saturates: measured over 34,152 real training pairs from
   # the epoch-1 checkpoint, the median gate sigmoid(gamma - (r_pos - r_neg)) is
@@ -203,7 +201,7 @@ training:
   # at the margin boundary -- the model stops improving the ordering while
   # nDCG@10 is still far from its ceiling. On identical features and the same
   # combined training file, a listwise objective is worth +4.9 nDCG@10 on
-  # PubMedQA-artificial and +1.4 on MedMCQA. See docs/OBJECTIVE.md.
+  # PubMedQA-artificial and +1.4 on MedMCQA.
   loss: "lambdarank"
   # Listwise only: candidates per pool. All positives are kept and the pool is
   # filled with negatives drawn by the same hard-negative sampler used in
@@ -251,7 +249,7 @@ evaluation:
   question_type_breakdown: true
   # Question type is an ANALYSIS dimension only. It is derived from the question
   # text at report time, is never stored in rank data and is never a model input
-  # (removed -- see docs/QUESTION_TYPE.md). These categories drive the per-type
+  # (removed). These categories drive the per-type
   # breakdown table and the alpha-by-type plot.
   question_types: ["diagnosis", "treatment", "mechanism", "contraindication", "factoid", "yesno", "other"]
 
@@ -290,7 +288,7 @@ qa:
   # covers 99% of them. See docs/RAG_DIAGNOSIS.md.
   reader_max_citations_yesno: 6
   reader_max_citations_mcq: 4
-  # Yes/no system prompt variant. v1_permissive is the CoopIS submission and the
+  # Yes/no system prompt variant. v1_permissive is the original prompt and the
   # measured default: over 300 PubMedQA-labeled questions with the passages held
   # fixed it scored 0.5333, while the anti-hedging "decisive" rewrite scored
   # 0.5300 -- suppressing hedging (79 -> 26 "maybe") did NOT convert into
