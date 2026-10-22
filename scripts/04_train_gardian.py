@@ -674,7 +674,7 @@ def main():
         type=str,
         default=None,
         help="Override model.controller_inputs (comma-separated subset of "
-             "query_emb,pool_feats). 'query_emb' is the CoopIS setting whose "
+             "query_emb,pool_feats). 'query_emb' is the original setting whose "
              "alpha does not transfer zero-shot; 'pool_feats' gives the "
              "controller scale-free evidence about how each channel behaved on "
              "this query's pool. This is the controller-input ablation axis.",
@@ -693,7 +693,7 @@ def main():
         dest="normalize_branches",
         action="store_false",
         default=None,
-        help="Mix raw branch outputs, as in the CoopIS submission.",
+        help="Mix raw branch outputs (the reported configuration).",
     )
     parser.add_argument(
         "--results-dir",
@@ -721,7 +721,7 @@ def main():
         help=(
             "Override training.loss. The three listwise objectives consume whole "
             "candidate pools and set --batch-size to count queries, not pairs; "
-            "pairwise_softplus_margin is the CoopIS submission, kept for the "
+            "pairwise_softplus_margin is the original objective, kept for the "
             "loss ablation."
         ),
     )
