@@ -8,7 +8,7 @@ Answers four questions the paper currently asserts without evidence:
      (separates reader failure from retrieval failure)
   C. What is the dominant error mode? (verdict confusion matrix)
   D. Is the ceiling set by first-stage retrieval or by ranking?
-     (pool_recall@K' vs the oracle re-ranking bound -- reviewer 1's question)
+     (pool_recall@K' vs the oracle re-ranking bound)
 
     python scripts/diagnose_rag.py --qa-json results/qa_hybrid_bm25_faiss_Llama3-8B_n300.json
     python scripts/diagnose_rag.py --pool-only          # D only, no QA run needed
