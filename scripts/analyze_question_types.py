@@ -1,7 +1,7 @@
 """
 Measure whether the question-type one-hot carries usable signal.
 
-Regenerates every number in ``docs/QUESTION_TYPE.md``:
+Reports:
 
   1. type distribution per dataset (is the one-hot constant?)
   2. whether the one-hot separates datasets (does it leak dataset identity?)
