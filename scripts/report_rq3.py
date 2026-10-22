@@ -7,7 +7,7 @@ Reads the end-to-end QA JSONs of the n=1000 matrix and prints three blocks:
 1. **Retrieval into the reader context**, once per back-end. Hit@10 (at least
    one gold passage in the reader's top-10) and Ctx (fraction of gold passages
    present) do not depend on the reader, so reporting them inside each reader's
-   column -- as the submitted table did -- duplicates a number and reads as a
+   column -- as an earlier version of the table did -- duplicates a number and reads as a
    copy-paste error.
 
 2. **Answer accuracy**, per (back-end, reader), always beside the trivial
