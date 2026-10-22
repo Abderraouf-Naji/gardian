@@ -64,7 +64,6 @@ See [`src/features/schema.py`](src/features/schema.py) for the exact ordering an
 Run commands from the repository root. Python **3.10 or newer** is declared in `pyproject.toml`. A Linux environment with an NVIDIA GPU is appropriate for the full indexing and LLM workflow. CPU execution is available for several stages, but large model and corpus runs require substantial time, RAM, and disk space. Requirements depend on corpus size, reader size, precision, and batch sizes; this repository does not establish a universal minimum GPU size.
 
 ```bash
-git clone https://github.com/Abderraouf-Naji/gardian.git
 cd gardian
 python3 -m venv .venv
 source .venv/bin/activate
