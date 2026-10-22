@@ -2,10 +2,9 @@
 """
 RQ4 cost table: what adaptive re-ranking costs in latency, training and size.
 
-Reviewer 4 accepted the effectiveness/latency trade-off but objected that the
-controller is trained by supervised learning and the training cost never
-appears. Reviewer 2 asked for the settings behind the reported latency. This
-script assembles both from artifacts that already exist, so nothing here is a
+The controller is trained by supervised learning, so its training cost belongs
+next to its inference latency, together with the settings behind that latency.
+This script assembles both from artifacts that already exist, so nothing here is a
 re-derivation or a remembered number:
 
     results/aggregated/training_summary.json   wall clock + parameters, 5 seeds
@@ -160,7 +159,7 @@ def collect_environment(results_dir: pathlib.Path, seed: int) -> Dict[str, Any]:
 
 
 def collect_hyperparameters(cfg: Any) -> Dict[str, Any]:
-    """The batch/precision settings reviewers asked to see stated."""
+    """The batch/precision settings behind the reported costs."""
     t = cfg.training
     m = cfg.model
     return {
@@ -630,7 +629,7 @@ def latex_lite_table(payload: Dict[str, Any]) -> str:
 
 
 def latex_training_table(payload: Dict[str, Any]) -> str:
-    """Training cost per back-end -- the table Reviewer 4 asked for."""
+    """Training cost per back-end."""
     train = payload.get("training", {})
     ltr = payload.get("lambdamart", {})
     env = payload.get("environment", {})
