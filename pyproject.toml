@@ -28,10 +28,6 @@ dependencies = [
   "numpy>=1.26.0"
 ]
 
-[project.urls]
-Homepage = "https://github.com/Abderraouf-Naji/gardian-reranker"
-Repository = "https://github.com/Abderraouf-Naji/gardian-reranker"
-Issues = "https://github.com/Abderraouf-Naji/gardian-reranker/issues"
 
 [project.scripts]
 gardian-rerank = "gardian_reranker.cli:main"
