@@ -64,6 +64,7 @@ See [`src/features/schema.py`](src/features/schema.py) for the exact ordering an
 Run commands from the repository root. Python **3.10 or newer** is declared in `pyproject.toml`. A Linux environment with an NVIDIA GPU is appropriate for the full indexing and LLM workflow. CPU execution is available for several stages, but large model and corpus runs require substantial time, RAM, and disk space. Requirements depend on corpus size, reader size, precision, and batch sizes; this repository does not establish a universal minimum GPU size.
 
 ```bash
+git clone <repository-url> gardian
 cd gardian
 python3 -m venv .venv
 source .venv/bin/activate
@@ -317,7 +318,7 @@ python scripts/report_rq3.py results/rq3_1k_fixidf/*.json
 
 The 7B/14B corrected files contain only the GARDIAN arm, so a paired report needs the matching original hybrid rows as well; do not treat a missing row as a zero result. Original and corrected 32B reader precision differs, which is why the corrected 32B run includes both arms.
 
-Implementation and experiment notes: [training objective](docs/OBJECTIVE.md), [question-type analysis](docs/QUESTION_TYPE.md), [reranking audit](docs/GARDIAN_RERANK_AUDIT.md), and [reader diagnosis](docs/RAG_DIAGNOSIS.md). Older notes describe earlier experiments; the committed result files and current configuration establish the scope of this README.
+Implementation and experiment notes: [reranking audit](docs/GARDIAN_RERANK_AUDIT.md) and [reader diagnosis](docs/RAG_DIAGNOSIS.md). Older notes describe earlier experiments; the committed result files and current configuration establish the scope of this README.
 
 ## Configuration
 
