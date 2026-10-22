@@ -2,7 +2,7 @@
 """
 RQ4 figure: the cost/effectiveness trade-off, as a Pareto plot.
 
-The submitted version of this figure used grouped bars in two rows -- quality on
+An earlier version of this figure used grouped bars in two rows -- quality on
 top, latency underneath -- across six panels. That layout has three problems for
 a question about *cost*:
 
@@ -39,7 +39,7 @@ from matplotlib.lines import Line2D
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Palette keeps the submitted figure's colours for the systems it contained, so
+# Palette keeps the earlier figure's colours for the systems it contained, so
 # a reader comparing versions is not re-learning the mapping. The two new
 # systems get a related blue (GARDIAN-Lite is the same model minus the
 # controller) and a neutral gold (LambdaMART is not a neural re-ranker).
